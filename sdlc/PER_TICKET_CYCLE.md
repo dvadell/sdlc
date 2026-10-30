@@ -17,4 +17,6 @@
 - Delegation to the ticket-solver agent may take up to ~45 min; use a longer wait timeout when polling for completion.
 - ocr review background jobs can be killed by the harness around ~20 min even with `--timeout 0`; re-run the same command.
 
+- SubscriberInitExt::set_default (scoped/thread-local) also calls tracing_log::LogTracer::init(), which sets the global log dispatcher; a later init_tracing() try_init then fails with SetLoggerError. Use tracing::subscriber::with_default (scoped) in tests instead of set_default.
+
 Important: Delegate the task to the ticket-solver agent. Do not do it yourself.

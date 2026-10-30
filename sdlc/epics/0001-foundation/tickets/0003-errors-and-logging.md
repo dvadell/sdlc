@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0001"]
 ---
 
@@ -32,10 +32,10 @@ keeping internal details out of responses.
 
 ## Acceptance criteria
 
-- [ ] Error body has exactly `error.code` and `error.message`.
-- [ ] Status and code are stable and chosen in one match, not in handlers.
-- [ ] Internal errors are logged once and expose no filesystem path.
-- [ ] `init_tracing()` is safe to call twice.
+- [x] Error body has exactly `error.code` and `error.message`.
+- [x] Status and code are stable and chosen in one match, not in handlers.
+- [x] Internal errors are logged once and expose no filesystem path.
+- [x] `init_tracing()` is safe to call twice.
 
 ## Tests
 
@@ -52,3 +52,17 @@ keeping internal details out of responses.
 - `code` is an API contract: use snake_case and never derive it from
   `Display`.
 - Adding `axum` here is fine; 0004 uses the same version from `Cargo.toml`.
+
+## Notes
+
+- Crate context: `sdlc::run() -> Result<(), ConfigError>` in `src/lib.rs` is the
+  current entry point; server startup (0004) will call `init_tracing()` and
+  consume `Config`, so keep the field set stable for those tickets.
+- No module error enums exist yet; `ApiError` must pick a fixed
+  `(StatusCode, &'static str)` per kind in a single match inside `src/error.rs`.
+  Nothing to convert yet, so the constructors carry the mapping.
+- `thiserror = "2"` is already in `Cargo.toml`; keep it. Add `axum` pinned at
+  `0.8` (see `sdlc/conventions.md`), plus `serde_json`, `tracing`,
+  `tracing-subscriber` (with the `env-filter` feature).
+- `internal(cause)` accepts anything `Debug + Send + Sync + 'static` (strings
+  included) so tests can pass `"secret /home/me/file"`.
