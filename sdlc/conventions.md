@@ -1,6 +1,6 @@
 # sdlc: Conventions
 
-*Status: Draft v0.1 · The "how we write code" document. For what the product does see `prd.md`; for how the system is structured see `architecture.md`.*
+*Status: Draft v0.1 · The "how we write code" document. For what the product does see `sdlc/PRD.md`; for how the system is structured see `sdlc/architecture.md`.*
 
 ## 1. Stack
 
@@ -66,7 +66,7 @@ sdlc/
     style.css
     js/                     # ES modules (see section 11)
     vendor/                 # marked.min.js, purify.min.js
-  docs/                     # this project's own documentation
+  sdlc/                     # product documentation root
   AGENTS.md
 ```
 
@@ -276,11 +276,30 @@ Print the listening URL and whether the AI is configured at startup, never the k
 ## 9. Document conventions (for the files sdlc manages)
 
 - Plain CommonMark Markdown; no sdlc-specific syntax beyond front matter and the PRD feature index markers.
-- Filenames are lowercase kebab-case. Decisions and tickets are prefixed with a four-digit number: `0003-use-axum.md`.
-- Front matter keys are lowercase; allowed values are listed in `architecture.md` section 6.
+- Filenames and directory names are lowercase kebab-case. Epics, decisions and tickets are prefixed with a four-digit number: an epic directory is `0001-foundation/`, and a decision or ticket file is `0003-use-axum.md`.
+- An epic is a directory `sdlc/epics/<epic>/` containing `description.md` and `tickets/`. Its tickets are `sdlc/epics/<epic>/tickets/<ticket>.md`.
+- Front matter keys are lowercase; allowed values are listed in `sdlc/architecture.md` section 6. Quote numbered references to keep leading zeros: `depends_on: ["0004"]`.
+- Epic membership comes from the ticket path. Do not add an `epic` front matter key to a ticket; it could disagree with the directory. A ticket may name its source feature with `feature: <slug>`.
 - Each document has exactly one H1 title.
 - The PRD stays short. Library names and code do not go in the PRD.
 - One fact lives in one place. Link to it elsewhere.
+
+### Epic description template
+```markdown
+---
+status: planned
+---
+# 0001: Foundation and server shell
+
+## Outcome
+What this epic delivers when it is done.
+
+## Tickets
+- [0001: Project skeleton](tickets/0001-project-skeleton.md)
+
+## Exit criteria
+Observable conditions for calling the epic done.
+```
 
 ### Decision file template
 ```markdown
@@ -300,11 +319,12 @@ What gets easier, what gets harder.
 ```
 
 ### Ticket file template
+Place at `sdlc/epics/<epic>/tickets/<ticket>.md`.
 ```markdown
 ---
 feature: export
 status: todo
-depends_on: [0004]
+depends_on: ["0004"]
 ---
 # 0007: Add CSV export endpoint
 
@@ -317,7 +337,7 @@ What to build and why, in two or three sentences.
 
 ## 10. Testing
 
-- **Unit tests** live next to the code in `#[cfg(test)] mod tests`. Cover parsing, validation, numbering, front matter, index generation, proposal block parsing.
+- **Unit tests** live next to the code in `#[cfg(test)] mod tests`. Cover parsing, validation, numbering, front matter, epic/ticket grouping, index generation, proposal block parsing.
 - **Integration tests** live in `tests/`. Each test creates a `tempfile::TempDir` project, starts the app on a random port, and talks to it over HTTP.
 - Fake the AI with `wiremock`, returning a canned streaming response. Never call a real AI service in tests.
 - Every bug fix gets a regression test.
@@ -328,9 +348,9 @@ What to build and why, in two or three sentences.
 #[tokio::test]
 async fn save_with_stale_hash_returns_conflict() {
     let app = TestApp::start().await;
-    app.write_file("docs/prd.md", "# PRD\n");
+    app.write_file("sdlc/PRD.md", "# PRD\n");
 
-    let res = app.put("/api/docs/docs/prd.md", json!({
+    let res = app.put("/api/docs/sdlc/PRD.md", json!({
         "content": "# New\n",
         "expected_hash": "not-the-current-hash",
     })).await;

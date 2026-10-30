@@ -1,6 +1,6 @@
 # sdlc: Architecture
 
-*Status: Draft v0.1 · Describes how the system is built to satisfy `prd.md`. Library choices and code style are in `conventions.md`. Individual choices and their reasons are recorded as decisions in `decisions/`.*
+*Status: Draft v0.1 · Describes how the system is built to satisfy `sdlc/PRD.md`. Library choices and code style are in `sdlc/conventions.md`. Individual choices and their reasons are recorded as decisions in `sdlc/decisions/`.*
 
 ## 1. Overview
 
@@ -38,7 +38,7 @@ Browser (plain JavaScript app)
 │                        │           └──────────────┘             │               │
 └────────────────────────┼────────────────────────────────────────┼───────────────┘
                          ▼                                        │
-                 Project directory (docs/, AGENTS.md)  ───────────┘
+                 Project directory (sdlc/, AGENTS.md)  ───────────┘
 
 Chat service ──HTTPS──► OpenAI-compatible API (configured by env vars)
 ```
@@ -72,12 +72,19 @@ This blocks DNS-rebinding and cross-site requests from malicious pages. State-ch
 The only component that touches the filesystem. Responsibilities:
 
 - **Layout knowledge.** Defines which paths are valid documents:
-  `docs/prd.md`, `docs/architecture.md`, `docs/conventions.md`, `AGENTS.md`, `docs/decisions/NNNN-*.md`, `docs/features/*.md`, `docs/tickets/NNNN-*.md`.
+  - `sdlc/PRD.md`, `sdlc/architecture.md`, `sdlc/conventions.md`, `AGENTS.md`
+  - `sdlc/epics/<epic>/description.md`
+  - `sdlc/epics/<epic>/tickets/<ticket>.md`
+  - `sdlc/decisions/NNNN-*.md`
+  - `sdlc/features/*.md`
+
+  `<epic>` and `<ticket>` are single path segments with a four-digit prefix:
+  `0001-foundation`, `0001-project-skeleton`.
 - **Path safety.** Every path from the outside is parsed into a validated `DocPath` (relative, no `..`, matches the layout). The resolved path is checked not to escape the project root, including through symlinks.
 - **Reads and writes.** Reads return content plus a content hash. Writes require the hash the client last saw; a mismatch returns a conflict instead of overwriting. Writes are atomic (temporary file in the same directory, then rename).
-- **Numbering.** Allocates the next `NNNN` for decisions and tickets.
-- **Metadata.** Parses the optional YAML front matter (see section 6) for status and links.
-- **Feature index.** Rewrites the region of `prd.md` between the markers `<!-- sdlc:feature-index:start -->` and `<!-- sdlc:feature-index:end -->` from the feature files whenever a feature is created, renamed, deleted or changes status.
+- **Numbering.** Allocates the next `NNNN` for epic directories, decisions and tickets. Ticket numbers are global across all epic `tickets/` directories; epic and ticket sequences are independent.
+- **Metadata.** Parses the optional YAML front matter (see section 6) for status and optional feature links. Epic membership is derived from the ticket path, not stored as a field.
+- **Feature index.** Rewrites the region of `sdlc/PRD.md` between the markers `<!-- sdlc:feature-index:start -->` and `<!-- sdlc:feature-index:end -->` from the feature files whenever a feature is created, renamed, deleted or changes status.
 - **Scaffolding.** Creates the starter layout from built-in templates on request.
 
 ### 3.3 File watcher
@@ -109,7 +116,7 @@ Turns AI output into something reviewable and safe to apply.
 ### 3.6 Frontend
 A single-page app written in plain HTML, CSS and JavaScript (ES modules, no framework, no bundler, no build step). The files are embedded in the binary as they are. Main areas:
 
-- **Sidebar:** document tree grouped by type, feature statuses, create/rename/delete actions.
+- **Sidebar:** document tree grouped by type, epics with ticket counts, ticket groups under their epic, feature statuses, create/rename/delete actions.
 - **Editor:** a plain `<textarea>` for Markdown source, with a preview toggle.
 - **Diff view:** replaces the editor when a proposal is pending. It shows the unified diff computed by the server, one section per affected file, with added and removed lines colored, and accept-all / reject-all buttons.
 - **Chat panel:** message list, input, attach-document control, and the built-in prompt shortcuts.
@@ -123,12 +130,12 @@ All bodies are JSON unless noted. Errors use one shape: `{ "error": { "code": ".
 | Method and path | Purpose |
 |-----------------|---------|
 | `GET /api/config` | Project directory name, port, model name, `ai_configured` |
-| `GET /api/tree` | All documents with type, title, status |
+| `GET /api/tree` | All documents with type, title, status and epic/feature linkage |
 | `GET /api/docs/{*path}` | Document content and hash |
 | `PUT /api/docs/{*path}` | Save content; body includes the expected hash; 409 on mismatch |
-| `POST /api/docs` | Create a document (feature, decision, ticket, or a missing core file) |
+| `POST /api/docs` | Create an epic, feature, decision or ticket |
 | `POST /api/docs/move` | Rename a document |
-| `DELETE /api/docs/{*path}` | Delete a feature, decision or ticket |
+| `DELETE /api/docs/{*path}` | Delete an epic (only when its `tickets/` is empty), feature, decision or ticket |
 | `POST /api/scaffold` | Create the starter layout |
 | `POST /api/chat` | Start a chat completion; response is an SSE stream |
 | `POST /api/proposals/{id}/accept` | Apply a proposal |
@@ -151,11 +158,11 @@ All bodies are JSON unless noted. Errors use one shape: `{ "error": { "code": ".
 Because the AI has no tools, it proposes changes with a plain-text convention in its reply. The system prompt instructs the model to put each file change in a block:
 
 ```
-=== FILE: docs/features/export.md ===
+=== FILE: sdlc/features/export.md ===
 (the complete new content of the file)
 === END FILE ===
 
-=== DELETE: docs/tickets/0007-old-ticket.md ===
+=== DELETE: sdlc/epics/0001-foundation/tickets/0007-old-ticket.md ===
 ```
 
 Rules:
@@ -168,13 +175,14 @@ Rules:
 
 Documents are plain Markdown. The only sdlc-specific elements are:
 
-1. **YAML front matter** (standard in Markdown tooling) on features, decisions and tickets:
+1. **YAML front matter** (standard in Markdown tooling) on epics, features, decisions and tickets:
+   - epic descriptions: `status: planned | in-progress | done`
    - features: `status: planned | in-progress | shipped`
    - decisions: `status: proposed | accepted | superseded`, optional `supersedes: NNNN`
-   - tickets: `feature: <feature-file-name>`, `status: todo | in-progress | done`, optional `depends_on: [NNNN]`
-2. **Feature index markers** in `prd.md` (HTML comments, invisible when rendered).
+   - tickets: optional `feature: <feature-file-name>`, `status: todo | in-progress | done`, optional `depends_on: ["NNNN"]`
+2. **Feature index markers** in `sdlc/PRD.md` (HTML comments, invisible when rendered).
 
-Files without front matter are still listed and editable; they just show no status.
+Files without front matter are still listed and editable; they just show no status. A ticket's epic is the directory that contains its `tickets/` folder, so there is no `epic` key to disagree with the path. A ticket whose parent epic has no `description.md` is listed as unassigned, not hidden.
 
 ## 7. Key flows
 
@@ -197,7 +205,7 @@ Files without front matter are still listed and editable; they just show no stat
 3. If the document is open and unmodified, the UI reloads it. If it has unsaved changes, the UI asks the person to choose.
 
 ### Ticket generation
-A built-in prompt sends the feature spec plus `conventions.md` to the model, asking for one `FILE` block per ticket under `docs/tickets/`. Numbering is assigned by the Proposal service, not by the model, so tickets never collide. Regeneration includes the feature's existing tickets in the context; the diff shows what would change.
+A built-in prompt sends the feature spec plus `conventions.md` to the model, asking for one `FILE` block per ticket under `sdlc/epics/<epic>/tickets/`. The person selects the epic before sending. The proposal writes each ticket into that epic's `tickets/` directory; membership comes from the path, and generated tickets also carry `feature: <slug>` when they came from a feature. Numbering is assigned by the Proposal service, not by the model, so tickets never collide. Regeneration includes the feature's existing tickets in the selected epic in the context; the diff shows what would change.
 
 ## 8. Error handling and failure modes
 
@@ -207,6 +215,7 @@ A built-in prompt sends the feature spec plus `conventions.md` to the model, ask
 | AI endpoint unreachable or returns an error | `error` event in the stream; message shown in chat; nothing is changed |
 | Stream interrupted | Partial text kept in chat; no proposal is created |
 | Malformed proposal block | Ignored, with a visible warning |
+| Ticket's parent epic has no `description.md` | Listed as unassigned with a warning; editing unaffected |
 | Proposal touches an invalid path | Whole proposal rejected, reason shown |
 | File changed since the proposal was made | Accept fails with a conflict; nothing is written |
 | Write fails midway through a multi-file accept | Already-written files are reported; the person is told exactly which files changed |
@@ -230,14 +239,14 @@ A built-in prompt sends the feature spec plus `conventions.md` to the model, ask
 
 ## 11. Testing strategy
 
-- **Unit tests** for `DocPath` validation, front matter parsing, proposal block parsing, numbering and feature index generation.
+- **Unit tests** for `DocPath` validation (including nested epic tickets), front matter parsing, proposal block parsing, numbering, epic/ticket grouping and feature index generation.
 - **Integration tests** that start the server against a temporary project directory and a mock OpenAI-compatible server, covering save conflicts, proposal accept/reject, and chat streaming.
 - **Security tests** for traversal attempts, bad Host/Origin headers, and symlink escapes.
 - **Frontend:** no automated tests in v1. Logic is kept in small functions (SSE frame parsing, diff line classification) so tests can be added later. A short manual checklist is run before each release.
 
 ## 12. Decisions to record
 
-These choices are made in this document and should each get a file in `decisions/`:
+These choices are made in this document and should each get a file in `sdlc/decisions/`:
 
 1. Use `axum` on `tokio` for the server.
 2. Files as the only storage; no database.
@@ -246,3 +255,5 @@ These choices are made in this document and should each get a file in `decisions
 5. Stateless chat endpoint; history lives in the browser.
 6. Plain HTML/CSS/JavaScript for the embedded frontend, with no build step and two vendored libraries.
 7. Optimistic concurrency with content hashes instead of file locks.
+8. Epics as directories with a `description.md` and a `tickets/` subdirectory; a ticket's path determines its exact epic.
+9. The YAML front matter crate chosen in 0012 (recorded there as an ADR).
