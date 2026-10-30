@@ -1,5 +1,8 @@
 //! sdlc binary.
 
-fn main() -> Result<(), std::io::Error> {
-    sdlc::run()
+fn main() {
+    if let Err(err) = sdlc::run() {
+        eprintln!("sdlc: {err}");
+        std::process::exit(1);
+    }
 }

@@ -57,3 +57,17 @@ Parse flags and environment variables once at startup into an immutable
   symlinks: document that the project root is the canonical directory.
 - Do not derive `Debug` on `ApiConfig`/`Config` until the key is redacted;
   `tracing::info!(?config)` is an easy accidental leak.
+
+## Notes
+
+- Crate context: `sdlc::run() -> Result<(), std::io::Error>` is in `src/lib.rs`
+  and called from `src/main.rs`; server startup (0004) and `AppState` (0007) consume
+  `Config`, so keep the field set stable for those tickets.
+- No dependencies exist yet; adding `clap = { version = "4", features = ["derive"] }`
+  is expected in this ticket.
+- The pure `Config::from_parts` may take parsed args plus an env lookup closure;
+  it must not touch process-global state or argv.
+- The invalid-`--dir` error type is not fixed here; conventions call for a module
+  error enum via `thiserror` (no `anyhow`/`Box<dyn Error>` in library code).
+- Naming for the AI config and its key newtype is not fixed here; pick one and stay
+  consistent with `conventions.md` and `architecture.md`.
