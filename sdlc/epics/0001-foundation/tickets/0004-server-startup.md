@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0002", "0003"]
 ---
 
@@ -32,11 +32,11 @@ the person can click, and fail clearly when the port is taken.
 
 ## Acceptance criteria
 
-- [ ] `--port 0` logs the real port, not `0`.
-- [ ] The process binds only `127.0.0.1`.
-- [ ] Occupied port prints one clear line and exits non-zero.
-- [ ] The AI key never appears in startup output.
-- [ ] Ctrl-C shuts down without panic.
+- [x] `--port 0` logs the real port, not `0`.
+- [x] The process binds only `127.0.0.1`.
+- [x] Occupied port prints one clear line and exits non-zero.
+- [x] The AI key never appears in startup output.
+- [x] Ctrl-C shuts down without panic.
 
 ## Tests
 

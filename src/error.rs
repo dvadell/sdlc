@@ -1,4 +1,4 @@
-//! The one error shape returned by API routes.
+//! The one error shape returned by API routes and the server startup.
 
 use axum::{
     Json,
@@ -7,7 +7,25 @@ use axum::{
 };
 use serde_json::json;
 use std::fmt::Debug;
+use std::io;
+use thiserror::Error;
 use tracing::error;
+
+/// Errors from starting the loopback server.
+#[derive(Debug, Error)]
+pub enum ServerError {
+    /// The configured loopback port is already taken.
+    #[error("port {port} is already in use; try --port <other>")]
+    AddrInUse { port: u16 },
+
+    /// The listener could not be bound or the server could not be started.
+    #[error("failed to start server on 127.0.0.1:{port}: {source}")]
+    Io {
+        port: u16,
+        #[source]
+        source: io::Error,
+    },
+}
 
 /// The error response returned by every API route.
 ///

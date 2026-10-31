@@ -64,6 +64,13 @@ pub struct AiConfig {
     api_key: Option<ApiKey>,
 }
 
+impl AiConfig {
+    /// The base URL without a trailing slash.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+}
+
 /// API key for the AI endpoint.
 ///
 /// `Debug` is implemented by hand rather than derived so the secret never
@@ -126,6 +133,21 @@ impl Config {
             open: args.open,
             ai,
         })
+    }
+
+    /// The configured port; `0` means an ephemeral port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Whether the browser opens after startup.
+    pub fn open(&self) -> bool {
+        self.open
+    }
+
+    /// The AI endpoint settings, when chat is configured.
+    pub fn ai(&self) -> Option<&AiConfig> {
+        self.ai.as_ref()
     }
 
     /// Validates the project directory and canonicalizes it.

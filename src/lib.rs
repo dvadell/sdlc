@@ -5,9 +5,14 @@
 pub mod config;
 pub mod error;
 
-use clap::Parser;
+pub use crate::config::{CliArgs, Config, ConfigError};
+pub use crate::error::ServerError;
 
-use crate::config::{CliArgs, Config, ConfigError};
+use std::io;
+use std::net::SocketAddr;
+
+use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use tokio::net::TcpListener;
 
 /// Initializes the tracing subscriber from `RUST_LOG`, defaulting to `info`.
 ///
@@ -22,19 +27,115 @@ pub fn init_tracing() -> Result<(), Box<dyn std::error::Error + Send + Sync + 's
         .try_init()
 }
 
-/// Placeholder entry point for the sdlc binary.
+/// Binds the loopback listener for the configured port.
 ///
-/// Returns `Ok(())` until the server shell lands in later tickets.
-pub fn run() -> Result<(), ConfigError> {
-    let _config = Config::from_parts(CliArgs::parse(), |key| std::env::var(key).ok())?;
+/// The listener always binds `127.0.0.1` so the server is not reachable from
+/// other machines. An already-taken port is reported as [`ServerError::AddrInUse`]
+/// with a hint to pick another port.
+pub async fn bind(config: &Config) -> Result<TcpListener, ServerError> {
+    let port = config.port();
 
-    // Server startup consumes the config in later tickets (0004, 0007).
-    Ok(())
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|source| {
+            if source.kind() == io::ErrorKind::AddrInUse {
+                ServerError::AddrInUse { port }
+            } else {
+                ServerError::Io { port, source }
+            }
+        })?;
+
+    Ok(listener)
+}
+
+/// Builds the placeholder router.
+///
+/// Later tickets extend this with the API routes, the guard and the embedded
+/// assets; ticket 0005 replaces the `GET /` handler.
+pub fn router() -> Router {
+    Router::new().route("/", get(placeholder))
+}
+
+/// Placeholder `GET /` handler returning `200` with body `sdlc` until the
+/// embedded frontend lands in ticket 0005.
+async fn placeholder() -> impl IntoResponse {
+    (StatusCode::OK, "sdlc").into_response()
+}
+
+/// Runs the placeholder server on the listener until Ctrl-C shuts it down.
+///
+/// The listener must already be bound (tests bind port `0` to get an ephemeral
+/// port); the bound address is returned so callers can print or reuse it. The
+/// URL is printed only after a successful bind, so it never points at a dead
+/// port.
+pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, ServerError> {
+    let addr = listener.local_addr().map_err(|source| ServerError::Io {
+        port: config.port(),
+        source,
+    })?;
+
+    println!("sdlc listening on http://{addr}");
+    println!("{}", ai_status(&config));
+
+    if config.open() {
+        open_browser(&format!("http://{addr}"));
+    }
+
+    let shutdown = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    axum::serve(listener, router())
+        .with_graceful_shutdown(shutdown)
+        .await
+        .map_err(|source| ServerError::Io {
+            port: config.port(),
+            source,
+        })?;
+
+    Ok(addr)
+}
+
+/// One startup line describing whether the AI endpoint is configured.
+fn ai_status(config: &Config) -> String {
+    match config.ai() {
+        Some(ai) => format!("AI: configured ({})", ai.base_url()),
+        None => "AI: not configured".to_string(),
+    }
+}
+
+/// Opens the default browser at `url`; failures are warnings and never fatal.
+fn open_browser(url: &str) {
+    let mut command = std::process::Command::new(browser_program());
+    if cfg!(target_os = "windows") {
+        command.args(["/C", "start", "", url]);
+    } else {
+        command.arg(url);
+    }
+    if let Err(err) = command.spawn() {
+        eprintln!("sdlc: could not open browser: {err}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn browser_program() -> &'static str {
+    "open"
+}
+
+#[cfg(target_os = "windows")]
+fn browser_program() -> &'static str {
+    "cmd"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn browser_program() -> &'static str {
+    "xdg-open"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn init_tracing_is_safe_to_call_twice() {
@@ -42,5 +143,12 @@ mod tests {
         let second = init_tracing();
         assert!(first.is_ok());
         assert!(second.is_err());
+    }
+
+    #[test]
+    fn ai_status_is_not_configured_without_ai_env() {
+        let config = Config::from_parts(CliArgs::parse_from(["sdlc"]), |_| None).expect("config");
+
+        assert_eq!(ai_status(&config), "AI: not configured");
     }
 }
