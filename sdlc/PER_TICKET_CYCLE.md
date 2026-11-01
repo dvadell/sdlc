@@ -25,4 +25,9 @@
 - axum 0.8 has no `with_ctrl_c`; use `Serve::with_graceful_shutdown` with an async future that awaits `tokio::signal::ctrl_c()` for Ctrl-C shutdown.
 - tokio features used directly by sdlc (`net`, `signal`, `io-util`, `macros`/`rt`, `time`) must be declared in `Cargo.toml` even when axum pulls some in transitively; without them the server types and async test helpers used here do not compile.
 
+- A delegated agent can hit the provider free-usage limit mid-task (the ticket-solver
+  session died this way), leaving partial edits behind. After every delegation, check
+  `git status` / `git diff` before committing; untracked files under `tests/` may be
+  half-finished solver output and must be reviewed before being committed.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
