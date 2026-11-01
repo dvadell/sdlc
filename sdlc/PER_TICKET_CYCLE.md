@@ -14,6 +14,7 @@
  - ocr review can fail transiently (task_done FAILED / LLM error / JSON parse / timeout) → re-run same command; --resume <sid> --from/--to/--commit if needed.
  - Review may hit tool-request caps / LLM parse errors but still emit findings/completion.
  - ocr review skips sdlc/tickets/**.
+- When ocr review fails every request with "network error", the configured LLM endpoint may be down: check with `ocr llm test` and simply re-run the same review once it answers; do not switch providers or models.
  - Delegation to the ticket-solver or build agent may take up to ~45 min; use a longer wait timeout when polling for completion.
  - ocr review background jobs can be killed by the harness around ~20 min even with `--timeout 0`; re-run the same command.
  - The task delegation tool rejected calls whose tasks member was sent as multi-line JSON, replying that a tasks array was missing; sending tasks as a single-line JSON array string works.
