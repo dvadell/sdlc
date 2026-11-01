@@ -26,8 +26,12 @@ async fn get_response(addr: SocketAddr) -> (u16, String, String) {
     let mut stream = TcpStream::connect(addr)
         .await
         .expect("connect to the server");
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
+        addr.port()
+    );
     stream
-        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .write_all(request.as_bytes())
         .await
         .expect("write the request");
     let mut response = String::new();

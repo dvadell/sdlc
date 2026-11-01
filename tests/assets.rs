@@ -22,12 +22,26 @@ fn asset_config(port: u16) -> Config {
 
 /// Performs a request against a running server and returns the status, content
 /// type and body of the response.
-async fn get_response(addr: SocketAddr, method: &str, target: &str) -> (u16, String, String) {
+async fn request_response(
+    addr: SocketAddr,
+    method: &str,
+    target: &str,
+    extra_headers: &[(&str, &str)],
+) -> (u16, String, String) {
     let mut stream = TcpStream::connect(addr)
         .await
         .expect("connect to the server");
-    let request =
-        format!("{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    let mut request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n",
+        addr.port()
+    );
+    for (name, value) in extra_headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("Connection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
         .await
@@ -62,12 +76,23 @@ async fn get_response(addr: SocketAddr, method: &str, target: &str) -> (u16, Str
     (status, content_type, body.trim().to_string())
 }
 
+async fn get_response(addr: SocketAddr, method: &str, target: &str) -> (u16, String, String) {
+    request_response(addr, method, target, &[]).await
+}
+
 async fn get(addr: SocketAddr, target: &str) -> (u16, String, String) {
     get_response(addr, "GET", target).await
 }
 
-async fn post(addr: SocketAddr, target: &str) -> (u16, String, String) {
-    get_response(addr, "POST", target).await
+/// Performs a JSON POST so the guard lets it through to the asset handler.
+async fn post_json(addr: SocketAddr, target: &str) -> (u16, String, String) {
+    request_response(
+        addr,
+        "POST",
+        target,
+        &[("Content-Type", "application/json")],
+    )
+    .await
 }
 
 #[tokio::test]
@@ -151,7 +176,7 @@ async fn post_to_root_is_rejected() {
     let addr = listener.local_addr().expect("the listener address");
     let server = tokio::spawn(serve(config, listener));
 
-    let (status, _, body) = post(addr, "/").await;
+    let (status, _, body) = post_json(addr, "/").await;
     assert_eq!(status, 405);
     assert!(body.is_empty());
 

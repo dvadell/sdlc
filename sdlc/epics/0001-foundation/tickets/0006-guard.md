@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0004"]
 ---
 
@@ -32,11 +32,11 @@ same-origin requests.
 
 ## Acceptance criteria
 
-- [ ] Same-origin `Host` and `Origin` pass.
-- [ ] `Host: evil.example`, `Host: 127.0.0.1:<wrong-port>` fail.
-- [ ] Foreign and `https` origins fail; absent origin passes.
-- [ ] `POST` with `text/plain` fails before reaching a handler.
-- [ ] `GET` without content type still passes.
+- [x] Same-origin `Host` and `Origin` pass.
+- [x] `Host: evil.example`, `Host: 127.0.0.1:<wrong-port>` fail.
+- [x] Foreign and `https` origins fail; absent origin passes.
+- [x] `POST` with `text/plain` fails before reaching a handler.
+- [x] `GET` without content type still passes.
 
 ## Tests
 

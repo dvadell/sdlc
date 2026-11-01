@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod error;
+pub mod guard;
 pub mod routes;
 
 pub use crate::config::{CliArgs, Config, ConfigError};
@@ -12,7 +13,7 @@ pub use crate::error::ServerError;
 use std::io;
 use std::net::SocketAddr;
 
-use axum::Router;
+use axum::{Router, middleware};
 use tokio::net::TcpListener;
 
 /// Initializes the tracing subscriber from `RUST_LOG`, defaulting to `info`.
@@ -49,12 +50,19 @@ pub async fn bind(config: &Config) -> Result<TcpListener, ServerError> {
     Ok(listener)
 }
 
-/// Builds the placeholder router.
+/// Builds the application router for the actual bound port.
 ///
-/// API routes are registered before the fallback in later tickets; the embedded
-/// frontend handler serves everything else, falling back to the entry page.
-pub fn router() -> Router {
-    Router::new().fallback(routes::assets::serve)
+/// The guard wraps every route, including the fallback, so no request reaches a
+/// handler without a valid loopback `Host`/`Origin`. API routes are registered
+/// before the fallback in later tickets; the embedded frontend handler serves
+/// everything else, falling back to the entry page.
+pub fn router(bound_port: u16) -> Router {
+    Router::new()
+        .fallback(routes::assets::serve)
+        .layer(middleware::from_fn_with_state(
+            guard::GuardState::new(bound_port),
+            guard::check,
+        ))
 }
 
 /// Runs the placeholder server on the listener until Ctrl-C shuts it down.
@@ -80,7 +88,7 @@ pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, 
         let _ = tokio::signal::ctrl_c().await;
     };
 
-    axum::serve(listener, router())
+    axum::serve(listener, router(addr.port()))
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|source| ServerError::Io {
