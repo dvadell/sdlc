@@ -34,10 +34,6 @@ pub enum ConfigError {
 }
 
 /// Immutable startup configuration.
-///
-/// The fields are read by later tickets (server startup in 0004, chat in
-/// 0005, `AppState` in 0007); nothing consumes them yet in this ticket.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Config {
     /// Canonical project directory.
@@ -51,8 +47,6 @@ pub struct Config {
 }
 
 /// Connection settings for the OpenAI-compatible AI endpoint.
-///
-/// The fields are read by the chat client in later tickets (0005).
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct AiConfig {
@@ -68,6 +62,11 @@ impl AiConfig {
     /// The base URL without a trailing slash.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// The model name sent to the endpoint.
+    pub fn model(&self) -> &str {
+        &self.model
     }
 }
 
@@ -133,6 +132,11 @@ impl Config {
             open: args.open,
             ai,
         })
+    }
+
+    /// The canonical project directory.
+    pub fn project_dir(&self) -> &Path {
+        &self.project_dir
     }
 
     /// The configured port; `0` means an ephemeral port.

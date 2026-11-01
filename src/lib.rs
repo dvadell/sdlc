@@ -6,9 +6,11 @@ pub mod config;
 pub mod error;
 pub mod guard;
 pub mod routes;
+pub mod state;
 
 pub use crate::config::{CliArgs, Config, ConfigError};
 pub use crate::error::ServerError;
+pub use crate::state::AppState;
 
 use std::io;
 use std::net::SocketAddr;
@@ -50,19 +52,22 @@ pub async fn bind(config: &Config) -> Result<TcpListener, ServerError> {
     Ok(listener)
 }
 
-/// Builds the application router for the actual bound port.
+/// Builds the application router for the given state.
 ///
 /// The guard wraps every route, including the fallback, so no request reaches a
 /// handler without a valid loopback `Host`/`Origin`. API routes are registered
-/// before the fallback in later tickets; the embedded frontend handler serves
-/// everything else, falling back to the entry page.
-pub fn router(bound_port: u16) -> Router {
-    Router::new()
+/// before the fallback; the embedded frontend handler serves everything else,
+/// falling back to the entry page.
+pub fn router(state: AppState) -> Router {
+    let bound_port = state.bound_port;
+
+    routes::router()
         .fallback(routes::assets::serve)
         .layer(middleware::from_fn_with_state(
             guard::GuardState::new(bound_port),
             guard::check,
         ))
+        .with_state(state)
 }
 
 /// Runs the placeholder server on the listener until Ctrl-C shuts it down.
@@ -72,15 +77,18 @@ pub fn router(bound_port: u16) -> Router {
 /// URL is printed only after a successful bind, so it never points at a dead
 /// port.
 pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, ServerError> {
+    let configured_port = config.port();
     let addr = listener.local_addr().map_err(|source| ServerError::Io {
-        port: config.port(),
+        port: configured_port,
         source,
     })?;
 
-    println!("sdlc listening on http://{addr}");
-    println!("{}", ai_status(&config));
+    let state = AppState::new(config, addr.port());
 
-    if config.open() {
+    println!("sdlc listening on http://{addr}");
+    println!("{}", ai_status(state.config.as_ref()));
+
+    if state.config.open() {
         open_browser(&format!("http://{addr}"));
     }
 
@@ -88,11 +96,11 @@ pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, 
         let _ = tokio::signal::ctrl_c().await;
     };
 
-    axum::serve(listener, router(addr.port()))
+    axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|source| ServerError::Io {
-            port: config.port(),
+            port: configured_port,
             source,
         })?;
 

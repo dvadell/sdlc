@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0002", "0005", "0006"]
 ---
 
@@ -38,12 +38,12 @@ the frontend one endpoint that answers "where am I and is AI available?".
 
 ## Acceptance criteria
 
-- [ ] `ai_configured` is true only when base URL and model are set.
-- [ ] `model` appears only when configured.
-- [ ] The serialized response never contains the API key or userinfo.
-- [ ] `port` is the actual bound port.
-- [ ] `project_name` is safe for a non-UTF-8 directory name (lossy fallback).
-- [ ] Unknown `/api/*` still returns the JSON 404 shape.
+- [x] `ai_configured` is true only when base URL and model are set.
+- [x] `model` appears only when configured.
+- [x] The serialized response never contains the API key or userinfo.
+- [x] `port` is the actual bound port.
+- [x] `project_name` is safe for a non-UTF-8 directory name (lossy fallback).
+- [x] Unknown `/api/*` still returns the JSON 404 shape.
 
 ## Tests
 
