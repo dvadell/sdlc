@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0001"]
 ---
 
@@ -38,16 +38,16 @@ AI becomes a `DocPath` before anything touches disk.
 
 ## Acceptance criteria
 
-- [ ] Every listed path parses; each kind is identified correctly.
-- [ ] `..`, `.`, absolute paths, `sdlc/../AGENTS.md`, `./sdlc/PRD.md`,
+- [x] Every listed path parses; each kind is identified correctly.
+- [x] `..`, `.`, absolute paths, `sdlc/../AGENTS.md`, `./sdlc/PRD.md`,
   backslashes, empty strings, trailing slashes and nested feature paths fail.
-- [ ] Unknown directories, non-Markdown files and uppercase extensions fail.
-- [ ] An unnumbered epic directory, decision or ticket fails
+- [x] Unknown directories, non-Markdown files and uppercase extensions fail.
+- [x] An unnumbered epic directory, decision or ticket fails
       (`sdlc/epics/use-axum/description.md`, `sdlc/decisions/use-axum.md`).
-- [ ] `sdlc/epics/0001-foundation/tickets/0001-project.md` is a ticket; the same
+- [x] `sdlc/epics/0001-foundation/tickets/0001-project.md` is a ticket; the same
   file at `sdlc/epics/0001-foundation/0001-project.md` is rejected.
-- [ ] A ticket outside an epic's `tickets/` directory is rejected.
-- [ ] Creation of a new path is possible without the file existing.
+- [x] A ticket outside an epic's `tickets/` directory is rejected.
+- [x] Creation of a new path is possible without the file existing.
 
 ## Tests
 

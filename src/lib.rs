@@ -7,6 +7,7 @@ pub mod error;
 pub mod guard;
 pub mod routes;
 pub mod state;
+pub mod store;
 
 pub use crate::config::{CliArgs, Config, ConfigError};
 pub use crate::error::ServerError;
