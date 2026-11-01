@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0008"]
 ---
 
@@ -31,12 +31,12 @@ escape through `..`, a symlink, or a symlinked directory.
 
 ## Acceptance criteria
 
-- [ ] A normal file inside the root resolves.
-- [ ] A symlinked file pointing outside the root is rejected.
-- [ ] A symlinked directory (`sdlc/features` → `/tmp/elsewhere`) is rejected.
-- [ ] A symlink that stays inside the root is allowed.
-- [ ] New files work when the parent exists and is inside the root.
-- [ ] The root itself may be reached through a symlink; the canonical root is
+- [x] A normal file inside the root resolves.
+- [x] A symlinked file pointing outside the root is rejected.
+- [x] A symlinked directory (`sdlc/features` → `/tmp/elsewhere`) is rejected.
+- [x] A symlink that stays inside the root is allowed.
+- [x] New files work when the parent exists and is inside the root.
+- [x] The root itself may be reached through a symlink; the canonical root is
   the comparison base.
 
 ## Tests
