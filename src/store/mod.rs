@@ -1,15 +1,18 @@
-//! The document store (tickets 0008–0010).
+//! The document store (tickets 0008–0011).
 //!
 //! The store is the only component that touches project files. This layer
 //! establishes the validated [`DocPath`], the layout whitelist, symlink-safe
-//! resolution and content reads with a SHA-256 hash; later tickets add writes,
-//! creation, listing and scaffolding.
+//! resolution, content reads with a SHA-256 hash and atomic, hash-checked
+//! writes; later tickets add creation, listing and scaffolding.
 
 pub mod layout;
 pub mod path;
 
+use std::ffi::OsStr;
 use std::io;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -68,6 +71,27 @@ pub struct Document {
     pub hash: String,
 }
 
+/// What the caller expects to find on disk before a save is allowed to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expectation {
+    /// The caller saw this content hash and claims the document is unchanged,
+    /// so the write may replace the current content.
+    Existing(String),
+    /// The caller believes the document does not exist yet, so the write must
+    /// create it and refuses to overwrite anything that is already there.
+    Missing,
+}
+
+impl Expectation {
+    /// The resolution mode that matches this expectation.
+    fn mode(&self) -> ResolveMode {
+        match self {
+            Expectation::Existing(_) => ResolveMode::Existing,
+            Expectation::Missing => ResolveMode::NewFile,
+        }
+    }
+}
+
 /// The document store, rooted at one canonical project directory.
 #[derive(Debug, Clone)]
 pub struct DocStore {
@@ -110,8 +134,8 @@ impl DocStore {
             }
             ResolveMode::NewFile => {
                 let relative = path.as_path();
-                let parent = relative.parent().ok_or_else(|| not_allowed(path))?;
-                let file_name = relative.file_name().ok_or_else(|| not_allowed(path))?;
+                let parent = relative.parent().ok_or_else(|| not_allowed(relative))?;
+                let file_name = relative.file_name().ok_or_else(|| not_allowed(relative))?;
                 let joined_parent = self.root.join(parent);
                 let resolved_parent = tokio::fs::canonicalize(&joined_parent)
                     .await
@@ -129,7 +153,7 @@ impl DocStore {
             tracing::debug!(resolved = %resolved.display(), "resolved document path");
             Ok(resolved)
         } else {
-            Err(not_allowed(path))
+            Err(not_allowed(path.as_path()))
         }
     }
 
@@ -143,31 +167,153 @@ impl DocStore {
         let resolved = self.resolve(path, ResolveMode::Existing).await?;
         let owned = path.clone();
 
-        let outcome = tokio::task::spawn_blocking(move || -> Result<Document, StoreError> {
-            let file_bytes =
-                std::fs::read(&resolved).map_err(|source| map_read_error(&owned, source))?;
-            let hash = content_hash(&file_bytes);
-            let content = String::from_utf8(file_bytes)
-                .map_err(|_| StoreError::InvalidUtf8(owned.as_path().display().to_string()))?;
+        tokio::task::spawn_blocking(move || read_document(&resolved, &owned))
+            .await
+            .map_err(|err| StoreError::Io(io::Error::other(err)))?
+    }
 
-            Ok(Document {
-                path: owned,
-                content,
-                hash,
-            })
+    /// Atomically writes `content` and returns the hash of the bytes written.
+    ///
+    /// The expectation decides what the caller saw before writing:
+    ///
+    /// - [`Expectation::Existing`] saves only while the file on disk still
+    ///   hashes to the expected value, and fails with a conflict that carries
+    ///   the hash actually on disk otherwise, so a stale save never clobbers an
+    ///   external change.
+    /// - [`Expectation::Missing`] creates the file and fails with
+    ///   [`StoreError::AlreadyExists`] when anything is already in the way.
+    ///
+    /// The write is atomic: the bytes go to a synced temp file that is renamed
+    /// over the target, so a failure never leaves a partial document behind.
+    /// The returned hash is the hash of the content that was written, ready to
+    /// be sent back by the next save.
+    pub async fn write(
+        &self,
+        path: &DocPath,
+        content: &str,
+        expectation: &Expectation,
+    ) -> Result<String, StoreError> {
+        let resolved = self.resolve(path, expectation.mode()).await?;
+        let owned = path.clone();
+        let owned_content = content.to_string();
+        let owned_expectation = expectation.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<String, StoreError> {
+            let new_hash = content_hash(owned_content.as_bytes());
+
+            match owned_expectation {
+                Expectation::Existing(hash) => {
+                    let current = read_document(&resolved, &owned)?;
+                    if current.hash != hash.as_str() {
+                        return Err(StoreError::Conflict {
+                            current_hash: current.hash,
+                        });
+                    }
+                    write_atomic(&resolved, owned_content.as_bytes())?;
+                }
+                Expectation::Missing => {
+                    if path_exists(&resolved)? {
+                        return Err(StoreError::AlreadyExists(
+                            owned.as_path().display().to_string(),
+                        ));
+                    }
+                    write_atomic(&resolved, owned_content.as_bytes())?;
+                }
+            }
+
+            Ok(new_hash)
         })
         .await
-        .map_err(|err| StoreError::Io(io::Error::other(err)))?;
-
-        let document = outcome?;
-
-        Ok(document)
+        .map_err(|err| StoreError::Io(io::Error::other(err)))?
     }
 }
 
+/// Reads the file at an already-resolved path into a [`Document`].
+///
+/// A missing file surfaces as [`StoreError::NotFound`]; an invalid UTF-8
+/// document surfaces as [`StoreError::InvalidUtf8`].
+fn read_document(resolved: &Path, path: &DocPath) -> Result<Document, StoreError> {
+    let file_bytes = std::fs::read(resolved).map_err(|source| map_read_error(path, source))?;
+    let hash = content_hash(&file_bytes);
+    let content = String::from_utf8(file_bytes)
+        .map_err(|_| StoreError::InvalidUtf8(path.as_path().display().to_string()))?;
+
+    Ok(Document {
+        path: path.clone(),
+        content,
+        hash,
+    })
+}
+
+/// Atomically replaces `target` with `bytes`.
+///
+/// The bytes land in a hidden temp file next to the target, which is synced
+/// and then renamed over the target, so a reader never observes a partially
+/// written file and a crash never leaves one behind. The temp file is
+/// removed on every error path.
+///
+/// Renaming over an existing file is atomic on Unix; on Windows the rename
+/// maps to a replace operation, and since the temp file always lives in the
+/// same directory as the target no rename ever crosses a volume.
+fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    let parent = target.parent().ok_or_else(|| not_allowed(target))?;
+    let file_name = target.file_name().ok_or_else(|| not_allowed(target))?;
+    let temp = temp_path(parent, file_name);
+
+    let written = (|| -> Result<(), StoreError> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+
+        // A rename keeps the temp file's mode, which is the platform default
+        // for a newly created file. Copy the replaced file's mode first, so
+        // overwriting never widens permissions beyond what the file had.
+        if let Ok(metadata) = std::fs::metadata(target) {
+            std::fs::set_permissions(&temp, metadata.permissions())?;
+        }
+
+        std::fs::rename(&temp, target)?;
+        Ok(())
+    })();
+
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+
+    written
+}
+
+/// Reports whether a path exists, translating `NotFound` into `false`.
+fn path_exists(path: &Path) -> Result<bool, StoreError> {
+    match std::fs::metadata(path) {
+        Ok(_) => Ok(true),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(StoreError::Io(source)),
+    }
+}
+
+/// Builds the temp file path used for an atomic write: a hidden file in the
+/// same directory as the target, named `.<file_name>.tmp-<suffix>`.
+fn temp_path(dir: &Path, file_name: &OsStr) -> PathBuf {
+    dir.join(format!(
+        ".{}.tmp-{}",
+        file_name.to_string_lossy(),
+        temp_suffix()
+    ))
+}
+
+/// Monotonic temp file suffix so concurrent writes never reuse a temp path.
+fn temp_suffix() -> u64 {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Builds the path-shaped error used for every rejected resolution.
-fn not_allowed(path: &DocPath) -> StoreError {
-    StoreError::NotAllowed(path.as_path().display().to_string())
+fn not_allowed(path: &Path) -> StoreError {
+    StoreError::NotAllowed(path.display().to_string())
 }
 
 /// Maps a canonicalization failure without leaking the absolute root path.
@@ -364,5 +510,250 @@ mod tests {
         assert_eq!(doc.hash, content_hash(b"# PRD"));
         let _ = CoreDoc::Prd;
         let _ = DocKind::Feature;
+    }
+
+    #[tokio::test]
+    async fn write_with_the_current_hash_writes_and_returns_the_new_hash() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+        let expectation = Expectation::Existing(content_hash(b"# PRD\n"));
+
+        let new_hash = store
+            .write(&prd_path(), "# Fresh\n", &expectation)
+            .await
+            .expect("the write should succeed");
+
+        let document = store.read(&prd_path()).await.expect("read prd");
+        assert_eq!(document.content, "# Fresh\n");
+        assert_eq!(document.hash, new_hash);
+        assert_eq!(new_hash, content_hash(b"# Fresh\n"));
+    }
+
+    #[tokio::test]
+    async fn write_with_a_stale_hash_returns_conflict_and_keeps_the_content() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+        let expectation = Expectation::Existing(content_hash(b""));
+
+        let error = store
+            .write(&prd_path(), "# Rewritten\n", &expectation)
+            .await
+            .expect_err("a stale hash must conflict");
+
+        match error {
+            StoreError::Conflict { current_hash } => {
+                assert_eq!(current_hash, content_hash(b"# PRD\n"));
+            }
+            other => panic!("expected a conflict, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/PRD.md")).expect("read back"),
+            "# PRD\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_expectation_creates_the_file() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+
+        let new_hash = store
+            .write(&prd_path(), "# Created\n", &Expectation::Missing)
+            .await
+            .expect("the create should succeed");
+
+        let document = store.read(&prd_path()).await.expect("read prd");
+        assert_eq!(document.content, "# Created\n");
+        assert_eq!(new_hash, content_hash(b"# Created\n"));
+        assert!(dir.path().join("sdlc/PRD.md").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_expectation_twice_returns_already_exists() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+
+        let error = store
+            .write(&prd_path(), "# Other\n", &Expectation::Missing)
+            .await
+            .expect_err("a second create must collide");
+
+        assert!(
+            matches!(error, StoreError::AlreadyExists(_)),
+            "got {error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/PRD.md")).expect("read back"),
+            "# PRD\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_leaves_no_temp_file_behind_after_a_successful_write() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+        let expectation = Expectation::Existing(content_hash(b"# PRD\n"));
+
+        store
+            .write(&prd_path(), "# Fresh\n", &expectation)
+            .await
+            .expect("the write should succeed");
+
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path().join("sdlc"))
+            .expect("read the document directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_does_not_widen_file_permissions() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        let target = dir.path().join("sdlc/PRD.md");
+        std::fs::write(&target, "# PRD\n").expect("write prd");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .expect("owner-only write");
+        let expectation = Expectation::Existing(content_hash(b"# PRD\n"));
+
+        store
+            .write(&prd_path(), "# Fresh\n", &expectation)
+            .await
+            .expect("the write should succeed");
+
+        let mode = std::fs::metadata(&target)
+            .expect("file metadata after write")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "an overwrite must not widen file permissions");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_write_removes_temp_files_and_keeps_the_original_content() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        let target = dir.path().join("sdlc/PRD.md");
+        std::fs::write(&target, "# PRD\n").expect("write prd");
+        let expectation = Expectation::Existing(content_hash(b"# PRD\n"));
+        let document_dir = dir.path().join("sdlc");
+        let permissions = std::fs::metadata(&document_dir)
+            .expect("document dir")
+            .permissions();
+        std::fs::set_permissions(&document_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("lock the document directory");
+
+        let error = store
+            .write(&prd_path(), "# Fresh\n", &expectation)
+            .await
+            .expect_err("a read-only directory must fail the write");
+
+        std::fs::set_permissions(&document_dir, permissions).expect("restore the directory");
+        assert!(matches!(error, StoreError::Io(_)), "got {error:?}");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read back"),
+            "# PRD\n"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(&document_dir)
+            .expect("read the document directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn writes_crlf_trailing_whitespace_and_empty_content_exactly() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        let original = "# Old\n";
+        std::fs::write(dir.path().join("sdlc/PRD.md"), original).expect("write prd");
+        let expectation = Expectation::Existing(content_hash(original.as_bytes()));
+
+        let hash = store
+            .write(&prd_path(), "# Title\r\n\r\nSome text   \n\n", &expectation)
+            .await
+            .expect("the write should succeed");
+
+        let document = store.read(&prd_path()).await.expect("read prd");
+        assert_eq!(document.content, "# Title\r\n\r\nSome text   \n\n");
+        assert_eq!(document.hash, hash);
+        assert_eq!(
+            document.hash,
+            content_hash(b"# Title\r\n\r\nSome text   \n\n")
+        );
+
+        let expectation = Expectation::Existing(hash);
+        let hash = store
+            .write(&prd_path(), "", &expectation)
+            .await
+            .expect("the empty write should succeed");
+
+        let document = store.read(&prd_path()).await.expect("read prd");
+        assert_eq!(document.content, "");
+        assert_eq!(document.hash, hash);
+        assert_eq!(hash, content_hash(b""));
+    }
+
+    #[tokio::test]
+    async fn two_writers_with_the_same_expected_hash_leave_exactly_one_winner() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+        let path = prd_path();
+        let expected = Expectation::Existing(content_hash(b"# PRD\n"));
+        let (release, signaled) = tokio::sync::oneshot::channel::<()>();
+
+        let task1_store = store.clone();
+        let task1_path = path.clone();
+        let task1_expectation = expected.clone();
+
+        let first_task = tokio::spawn(async move {
+            let result = task1_store
+                .write(&task1_path, "# First\n", &task1_expectation)
+                .await;
+            let _ = release.send(());
+            result
+        });
+
+        let task2_store = store.clone();
+        let task2_path = path.clone();
+        let task2_expectation = expected.clone();
+        let second_task = tokio::spawn(async move {
+            let _ = signaled.await;
+            task2_store
+                .write(&task2_path, "# Second\n", &task2_expectation)
+                .await
+        });
+
+        let first = first_task
+            .await
+            .expect("first writer task")
+            .expect("first writer should win");
+        let second = second_task
+            .await
+            .expect("second writer task")
+            .expect_err("the late writer with a stale hash should conflict");
+
+        assert_eq!(first, content_hash(b"# First\n"));
+        assert!(
+            matches!(second, StoreError::Conflict { .. }),
+            "got {second:?}"
+        );
+        let document = store.read(&prd_path()).await.expect("read prd");
+        assert_eq!(document.content, "# First\n");
     }
 }

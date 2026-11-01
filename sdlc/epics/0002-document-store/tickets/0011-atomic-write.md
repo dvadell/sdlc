@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0010"]
 ---
 
@@ -32,12 +32,12 @@ half-written file on disk.
 
 ## Acceptance criteria
 
-- [ ] Correct hash writes the content and returns the new hash.
-- [ ] Stale hash returns `Conflict` and leaves the file untouched.
-- [ ] `Missing` creates; a second `Missing` returns `AlreadyExists`.
-- [ ] A failure while writing leaves no temp files and no partial target.
-- [ ] CRLF, trailing whitespace and empty content are written exactly.
-- [ ] File permissions are not widened beyond the platform default.
+- [x] Correct hash writes the content and returns the new hash.
+- [x] Stale hash returns `Conflict` and leaves the file untouched.
+- [x] `Missing` creates; a second `Missing` returns `AlreadyExists`.
+- [x] A failure while writing leaves no temp files and no partial target.
+- [x] CRLF, trailing whitespace and empty content are written exactly.
+- [x] File permissions are not widened beyond the platform default.
 
 ## Tests
 
@@ -45,6 +45,7 @@ half-written file on disk.
 - **Unit:** after a successful write the directory contains no `.tmp-*` file.
 - **Unit:** simulate a failure (read-only directory, or a missing parent) and
   assert the original content is intact.
+- **Unit:** overwrite keeps the file's permission bits instead of widening them.
 - **Concurrency:** two writers with the same expected hash; exactly one
   succeeds and the other gets `Conflict`.
 
