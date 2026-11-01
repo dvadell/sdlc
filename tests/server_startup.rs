@@ -88,8 +88,8 @@ async fn serve_on_ephemeral_port_responds_at_root() {
     let server = tokio::spawn(serve(config, listener));
     let (status, content_type, body) = get_response(addr).await;
     assert_eq!(status, 200);
-    assert_eq!(content_type, "text/plain");
-    assert_eq!(body, "sdlc");
+    assert_eq!(content_type, "text/html");
+    assert!(body.contains("The UI is under construction."));
 
     server.abort();
 }

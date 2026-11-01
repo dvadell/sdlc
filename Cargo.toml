@@ -20,6 +20,7 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
+rust-embed = { version = "8", features = ["mime-guess"] }
 
 [dev-dependencies]
 tempfile = "3"

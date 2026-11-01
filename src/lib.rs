@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod error;
+pub mod routes;
 
 pub use crate::config::{CliArgs, Config, ConfigError};
 pub use crate::error::ServerError;
@@ -11,7 +12,7 @@ pub use crate::error::ServerError;
 use std::io;
 use std::net::SocketAddr;
 
-use axum::{Router, http::StatusCode, response::IntoResponse, routing::get};
+use axum::Router;
 use tokio::net::TcpListener;
 
 /// Initializes the tracing subscriber from `RUST_LOG`, defaulting to `info`.
@@ -50,16 +51,10 @@ pub async fn bind(config: &Config) -> Result<TcpListener, ServerError> {
 
 /// Builds the placeholder router.
 ///
-/// Later tickets extend this with the API routes, the guard and the embedded
-/// assets; ticket 0005 replaces the `GET /` handler.
+/// API routes are registered before the fallback in later tickets; the embedded
+/// frontend handler serves everything else, falling back to the entry page.
 pub fn router() -> Router {
-    Router::new().route("/", get(placeholder))
-}
-
-/// Placeholder `GET /` handler returning `200` with body `sdlc` until the
-/// embedded frontend lands in ticket 0005.
-async fn placeholder() -> impl IntoResponse {
-    (StatusCode::OK, "sdlc").into_response()
+    Router::new().fallback(routes::assets::serve)
 }
 
 /// Runs the placeholder server on the listener until Ctrl-C shuts it down.

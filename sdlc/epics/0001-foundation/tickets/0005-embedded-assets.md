@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0004"]
 ---
 
@@ -32,12 +32,12 @@ embed it.
 
 ## Acceptance criteria
 
-- [ ] `GET /` returns the page with `text/html`.
-- [ ] `GET /style.css` returns `text/css`.
-- [ ] `GET /anything-unknown` returns the page (SPA fallback).
-- [ ] `GET /api/unknown` returns JSON 404, not HTML.
-- [ ] `POST /` is rejected (405).
-- [ ] Encoded traversal cannot read a file outside `frontend/`.
+- [x] `GET /` returns the page with `text/html`.
+- [x] `GET /style.css` returns `text/css`.
+- [x] `GET /anything-unknown` returns the page (SPA fallback).
+- [x] `GET /api/unknown` returns JSON 404, not HTML.
+- [x] `POST /` is rejected (405).
+- [x] Encoded traversal cannot read a file outside `frontend/`.
 
 ## Tests
 
