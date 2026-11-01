@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0009"]
 ---
 
@@ -27,12 +27,12 @@ client sends back on save.
 
 ## Acceptance criteria
 
-- [ ] Content is returned byte-for-byte as UTF-8: no line-ending normalization,
+- [x] Content is returned byte-for-byte as UTF-8: no line-ending normalization,
   no BOM stripping, no trimming.
-- [ ] The hash is deterministic and identical for identical bytes.
-- [ ] Missing files return `NotFound`.
-- [ ] Invalid UTF-8 returns a distinct error, not a panic or lossy string.
-- [ ] Hashing does not run on the async worker for large files
+- [x] The hash is deterministic and identical for identical bytes.
+- [x] Missing files return `NotFound`.
+- [x] Invalid UTF-8 returns a distinct error, not a panic or lossy string.
+- [x] Hashing does not run on the async worker for large files
   (`spawn_blocking` above a small threshold).
 
 ## Tests
