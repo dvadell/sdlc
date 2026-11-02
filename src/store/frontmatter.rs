@@ -108,16 +108,48 @@ pub enum EpicStatus {
     Done,
 }
 
-impl EpicStatus {
-    /// The front matter value of the status, for example `planned`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EpicStatus::Planned => "planned",
-            EpicStatus::InProgress => "in-progress",
-            EpicStatus::Done => "done",
+/// Implements `as_str` for a status enum from its kebab-case variant names and
+/// values, so every status vocabulary shares one conversion.
+macro_rules! status_as_str {
+    ($enum_name:ident, $($variant:ident => $value:expr),+ $(,)?) => {
+        impl $enum_name {
+            /// The front matter value of the status.
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $($enum_name::$variant => $value,)+
+                }
+            }
         }
-    }
+    };
 }
+
+status_as_str!(
+    EpicStatus,
+    Planned => "planned",
+    InProgress => "in-progress",
+    Done => "done"
+);
+
+status_as_str!(
+    FeatureStatus,
+    Planned => "planned",
+    InProgress => "in-progress",
+    Shipped => "shipped"
+);
+
+status_as_str!(
+    DecisionStatus,
+    Proposed => "proposed",
+    Accepted => "accepted",
+    Superseded => "superseded"
+);
+
+status_as_str!(
+    TicketStatus,
+    Todo => "todo",
+    InProgress => "in-progress",
+    Done => "done"
+);
 
 /// The status a feature may carry: `planned`, `in-progress`, `shipped`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -129,17 +161,6 @@ pub enum FeatureStatus {
     InProgress,
     /// The feature shipped.
     Shipped,
-}
-
-impl FeatureStatus {
-    /// The front matter value of the status, for example `planned`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            FeatureStatus::Planned => "planned",
-            FeatureStatus::InProgress => "in-progress",
-            FeatureStatus::Shipped => "shipped",
-        }
-    }
 }
 
 /// The status a decision may carry: `proposed`, `accepted`, `superseded`.
@@ -154,17 +175,6 @@ pub enum DecisionStatus {
     Superseded,
 }
 
-impl DecisionStatus {
-    /// The front matter value of the status, for example `proposed`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DecisionStatus::Proposed => "proposed",
-            DecisionStatus::Accepted => "accepted",
-            DecisionStatus::Superseded => "superseded",
-        }
-    }
-}
-
 /// The status a ticket may carry: `todo`, `in-progress`, `done`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -175,17 +185,6 @@ pub enum TicketStatus {
     InProgress,
     /// The ticket is done.
     Done,
-}
-
-impl TicketStatus {
-    /// The front matter value of the status, for example `todo`.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TicketStatus::Todo => "todo",
-            TicketStatus::InProgress => "in-progress",
-            TicketStatus::Done => "done",
-        }
-    }
 }
 
 /// The raw front matter of an epic: the kind-specific status only.

@@ -100,7 +100,7 @@ impl DocStore {
             if let Some(entry) = entry {
                 docs.push(entry);
             } else {
-                tracing::warn!(epic = %name, "epic description is missing; listing its tickets anyway");
+                tracing::warn!(epic = %name, "epic description unavailable; listing its tickets anyway");
             }
 
             let tickets_dir = self
@@ -109,49 +109,43 @@ impl DocStore {
                 .join("epics")
                 .join(&name)
                 .join("tickets");
-            let mut tickets: Vec<(u32, String)> = Vec::new();
+            let mut tickets: Vec<(u32, DocEntry)> = Vec::new();
             if let Ok(mut dir) = tokio::fs::read_dir(&tickets_dir).await {
                 while let Some(ticket) = dir.next_entry().await.ok().flatten() {
                     let ticket_name = ticket.file_name().to_string_lossy().into_owned();
                     let raw = format!("sdlc/epics/{name}/tickets/{ticket_name}");
-                    if self
+                    if let Some(entry) = self
                         .read_at(&raw, DocKind::Ticket, Some(name.clone()))
                         .await
-                        .is_some()
                     {
-                        tickets.push((numbered_prefix(&ticket_name), raw));
+                        tickets.push((numbered_prefix(&ticket_name), entry));
                     }
                 }
             }
-            tickets.sort();
-            for (_, raw) in tickets {
-                if let Some(entry) = self
-                    .read_at(&raw, DocKind::Ticket, Some(name.clone()))
-                    .await
-                {
-                    docs.push(entry);
-                }
-            }
+            tickets.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| a.1.path.as_path().cmp(b.1.path.as_path()))
+            });
+            docs.extend(tickets.into_iter().map(|(_, entry)| entry));
         }
 
         // Decisions by number, then features by title.
-        let mut decisions: Vec<(u32, String)> = Vec::new();
+        let mut decisions: Vec<(u32, DocEntry)> = Vec::new();
         let decisions_dir = self.root.join("sdlc").join("decisions");
         if let Ok(mut dir) = tokio::fs::read_dir(&decisions_dir).await {
             while let Some(entry) = dir.next_entry().await.ok().flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let raw = format!("sdlc/decisions/{name}");
-                if self.read_at(&raw, DocKind::Decision, None).await.is_some() {
-                    decisions.push((numbered_prefix(&name), raw));
+                if let Some(decision) = self.read_at(&raw, DocKind::Decision, None).await {
+                    decisions.push((numbered_prefix(&name), decision));
                 }
             }
         }
-        decisions.sort();
-        for (_, raw) in decisions {
-            if let Some(entry) = self.read_at(&raw, DocKind::Decision, None).await {
-                docs.push(entry);
-            }
-        }
+        decisions.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.path.as_path().cmp(b.1.path.as_path()))
+        });
+        docs.extend(decisions.into_iter().map(|(_, entry)| entry));
 
         let mut features: Vec<DocEntry> = Vec::new();
         let features_dir = self.root.join("sdlc").join("features");
@@ -200,8 +194,7 @@ impl DocStore {
                 return None;
             }
         };
-        let status = status_of(kind, &document.content, &file);
-        let feature = feature_of(kind, &document.content, &file);
+        let (status, feature) = metadata_of(kind, &document.content, &file);
 
         Some(DocEntry {
             path: path.clone(),
@@ -227,42 +220,37 @@ impl DocStore {
     }
 }
 
+/// The status and optional feature binding of a document, parsed from a
+/// single front matter pass. Only tickets carry a feature binding.
+fn metadata_of(kind: DocKind, content: &str, file: &str) -> (Option<String>, Option<String>) {
+    match kind {
+        DocKind::Core(_) => (None, None),
+        DocKind::Epic => {
+            let meta = frontmatter::parse_epic(content, file);
+            (meta.status.map(|status| status.as_str().to_owned()), None)
+        }
+        DocKind::Feature => {
+            let meta = frontmatter::parse_feature(content, file);
+            (meta.status.map(|status| status.as_str().to_owned()), None)
+        }
+        DocKind::Decision => {
+            let meta = frontmatter::parse_decision(content, file);
+            (meta.status.map(|status| status.as_str().to_owned()), None)
+        }
+        DocKind::Ticket => {
+            let meta = frontmatter::parse_ticket(content, file);
+            (
+                meta.status.map(|status| status.as_str().to_owned()),
+                meta.feature
+                    .map(|feature| feature.strip_suffix(".md").unwrap_or(&feature).to_owned()),
+            )
+        }
+    }
+}
+
 /// Reports whether a raw layout path names a document of the expected kind.
 fn names_kind(raw: &str, kind: DocKind) -> bool {
     DocPath::parse(raw).is_ok_and(|path| layout::kind(path.as_path()) == Some(kind))
-}
-
-/// The status of a document of `kind`, as the lowercase front matter value, or
-/// `None` when the document has no front matter, unusable front matter or an
-/// unknown status value.
-fn status_of(kind: DocKind, content: &str, file: &str) -> Option<String> {
-    match kind {
-        DocKind::Core(_) => None,
-        DocKind::Epic => frontmatter::parse_epic(content, file)
-            .status
-            .map(|status| status.as_str().to_owned()),
-        DocKind::Feature => frontmatter::parse_feature(content, file)
-            .status
-            .map(|status| status.as_str().to_owned()),
-        DocKind::Decision => frontmatter::parse_decision(content, file)
-            .status
-            .map(|status| status.as_str().to_owned()),
-        DocKind::Ticket => frontmatter::parse_ticket(content, file)
-            .status
-            .map(|status| status.as_str().to_owned()),
-    }
-}
-
-/// The optional feature slug a ticket binds to, without the markdown suffix,
-/// or `None` when the kind does not carry one.
-fn feature_of(kind: DocKind, content: &str, file: &str) -> Option<String> {
-    if kind != DocKind::Ticket {
-        return None;
-    }
-
-    frontmatter::parse_ticket(content, file)
-        .feature
-        .map(|feature| feature.strip_suffix(".md").unwrap_or(&feature).to_owned())
 }
 
 /// Extracts the document title: the first ATX H1 outside front matter and
@@ -303,7 +291,8 @@ fn atx_h1(line: &str) -> Option<String> {
         return None;
     }
     let text = rest.strip_prefix(' ').unwrap_or("");
-    Some(text.trim_end_matches('#').trim_end().to_string())
+    let trimmed = text.trim_end_matches('#').trim_end();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Humanizes a file name for display, dropping the numeric prefix:
@@ -323,8 +312,7 @@ fn humanize(file: &str) -> String {
     let mut chars = spaced.trim().chars();
     let mut title = String::with_capacity(spaced.len() + 1);
     if let Some(first) = chars.next() {
-        let mut uppercased = first.to_uppercase();
-        title.push(uppercased.next().unwrap_or(first));
+        title.extend(first.to_uppercase());
     }
     for character in chars {
         title.push(character);
