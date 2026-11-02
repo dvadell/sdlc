@@ -1,13 +1,15 @@
-//! The document store (tickets 0008–0011).
+//! The document store (tickets 0008–0013).
 //!
 //! The store is the only component that touches project files. This layer
 //! establishes the validated [`DocPath`], the layout whitelist, symlink-safe
 //! resolution, content reads with a SHA-256 hash and atomic, hash-checked
-//! writes; later tickets add creation, listing and scaffolding.
+//! writes, and the document tree listing; later tickets add creation and
+//! scaffolding.
 
 pub mod frontmatter;
 pub mod layout;
 pub mod path;
+pub mod tree;
 
 use std::ffi::OsStr;
 use std::io;
@@ -51,6 +53,7 @@ pub enum StoreError {
 
 pub use layout::{CoreDoc, DocKind};
 pub use path::DocPath;
+pub use tree::{DocEntry, Tree};
 
 /// How [`DocStore::resolve`] treats the target's existence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

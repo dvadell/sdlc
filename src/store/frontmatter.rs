@@ -108,6 +108,17 @@ pub enum EpicStatus {
     Done,
 }
 
+impl EpicStatus {
+    /// The front matter value of the status, for example `planned`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EpicStatus::Planned => "planned",
+            EpicStatus::InProgress => "in-progress",
+            EpicStatus::Done => "done",
+        }
+    }
+}
+
 /// The status a feature may carry: `planned`, `in-progress`, `shipped`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -118,6 +129,17 @@ pub enum FeatureStatus {
     InProgress,
     /// The feature shipped.
     Shipped,
+}
+
+impl FeatureStatus {
+    /// The front matter value of the status, for example `planned`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FeatureStatus::Planned => "planned",
+            FeatureStatus::InProgress => "in-progress",
+            FeatureStatus::Shipped => "shipped",
+        }
+    }
 }
 
 /// The status a decision may carry: `proposed`, `accepted`, `superseded`.
@@ -132,6 +154,17 @@ pub enum DecisionStatus {
     Superseded,
 }
 
+impl DecisionStatus {
+    /// The front matter value of the status, for example `proposed`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DecisionStatus::Proposed => "proposed",
+            DecisionStatus::Accepted => "accepted",
+            DecisionStatus::Superseded => "superseded",
+        }
+    }
+}
+
 /// The status a ticket may carry: `todo`, `in-progress`, `done`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -142,6 +175,17 @@ pub enum TicketStatus {
     InProgress,
     /// The ticket is done.
     Done,
+}
+
+impl TicketStatus {
+    /// The front matter value of the status, for example `todo`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TicketStatus::Todo => "todo",
+            TicketStatus::InProgress => "in-progress",
+            TicketStatus::Done => "done",
+        }
+    }
 }
 
 /// The raw front matter of an epic: the kind-specific status only.
@@ -612,5 +656,21 @@ mod tests {
         let meta = parse_epic(content, "sdlc/epics/0001-foundation/description.md");
         assert_eq!(meta.status, Some(EpicStatus::Planned));
         assert_eq!(content, "---\nstatus: planned\n---\n\n# Title\n");
+    }
+
+    #[test]
+    fn status_accessors_return_the_kebab_case_front_matter_value() {
+        assert_eq!(EpicStatus::Planned.as_str(), "planned");
+        assert_eq!(EpicStatus::InProgress.as_str(), "in-progress");
+        assert_eq!(EpicStatus::Done.as_str(), "done");
+        assert_eq!(FeatureStatus::Planned.as_str(), "planned");
+        assert_eq!(FeatureStatus::InProgress.as_str(), "in-progress");
+        assert_eq!(FeatureStatus::Shipped.as_str(), "shipped");
+        assert_eq!(DecisionStatus::Proposed.as_str(), "proposed");
+        assert_eq!(DecisionStatus::Accepted.as_str(), "accepted");
+        assert_eq!(DecisionStatus::Superseded.as_str(), "superseded");
+        assert_eq!(TicketStatus::Todo.as_str(), "todo");
+        assert_eq!(TicketStatus::InProgress.as_str(), "in-progress");
+        assert_eq!(TicketStatus::Done.as_str(), "done");
     }
 }
