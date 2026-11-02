@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0011", "0012", "0014"]
 ---
 
@@ -41,20 +41,20 @@ title and a conventional name, in one safe operation.
 
 ## Acceptance criteria
 
-- [ ] Each kind produces a file whose front matter parses via 0012.
-- [ ] Epic creation produces `sdlc/epics/NNNN-slug/description.md`.
-- [ ] Epic H1 includes the allocated number; epic status defaults to `planned`.
-- [ ] Decision and ticket H1s include the allocated number.
-- [ ] A created ticket lands in the selected epic's `tickets/` directory and has
+- [x] Each kind produces a file whose front matter parses via 0012.
+- [x] Epic creation produces `sdlc/epics/NNNN-slug/description.md`.
+- [x] Epic H1 includes the allocated number; epic status defaults to `planned`.
+- [x] Decision and ticket H1s include the allocated number.
+- [x] A created ticket lands in the selected epic's `tickets/` directory and has
   no `epic` front matter key.
-- [ ] Duplicate feature names fail without touching the existing file.
-- [ ] Ticket creation without an epic, or with an unknown epic, fails with a
+- [x] Duplicate feature names fail without touching the existing file.
+- [x] Ticket creation without an epic, or with an unknown epic, fails with a
   useful message.
-- [ ] Ticket creation with an unknown feature fails; omitting the feature is
+- [x] Ticket creation with an unknown feature fails; omitting the feature is
   allowed.
-- [ ] Titles with `/`, `..`, quotes, newlines or only punctuation are rejected
+- [x] Titles with `/`, `..`, quotes, newlines or only punctuation are rejected
   or safely slugified; no path can escape.
-- [ ] Files end with exactly one trailing newline.
+- [x] Files end with exactly one trailing newline.
 
 ## Tests
 

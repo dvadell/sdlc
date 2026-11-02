@@ -87,6 +87,7 @@ The only component that touches the filesystem. Responsibilities:
 - **Metadata.** Parses the optional YAML front matter (see section 6) for status and optional feature links. Epic membership is derived from the ticket path, not stored as a field.
 - **Feature index.** Rewrites the region of `sdlc/PRD.md` between the markers `<!-- sdlc:feature-index:start -->` and `<!-- sdlc:feature-index:end -->` from the feature files whenever a feature is created, renamed, deleted or changes status.
 - **Scaffolding.** Creates the starter layout from built-in templates on request.
+- **Creation from templates.** `DocStore::create` validates and slugifies the title, renders the kind's built-in template and writes through the missing-expectation path so existing documents are never overwritten. Numbered kinds allocate the next `NNNN`, and tickets land in their epic's `tickets/` directory with an optional existing feature binding.
 
 ### 3.3 File watcher
 Watches the project's document paths and publishes `file-changed` events. Events caused by sdlc's own writes are suppressed by comparing content hashes with what DocStore just wrote. Events are debounced so editors that write in several steps produce one notification.

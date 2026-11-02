@@ -18,7 +18,7 @@ use crate::store::{DocStore, Expectation, StoreError};
 const MAX_NUMBER: u32 = 9999;
 
 /// How many times a lost creation race is retried before giving up.
-const MAX_CREATE_ATTEMPTS: usize = 3;
+pub(crate) const MAX_CREATE_ATTEMPTS: usize = 3;
 
 impl DocStore {
     /// Returns the next epic number: the highest existing epic number plus
@@ -61,10 +61,27 @@ impl DocStore {
     /// [`StoreError::AlreadyExists`], which this helper answers by re-scanning
     /// for the next number instead of overwriting.
     pub async fn create_epic(&self, slug: &str, content: &str) -> Result<DocPath, StoreError> {
+        let content = content.to_string();
+        self.create_epic_at_next(slug.to_string(), move |_| content.clone())
+            .await
+    }
+
+    /// Creates a new epic description at the next epic number, retrying with a
+    /// fresh number when a concurrent create already claimed it.
+    ///
+    /// The scan for the next number and the create run inside one write
+    /// critical section, and a lost race still surfaces as
+    /// [`StoreError::AlreadyExists`], which this helper answers by re-scanning
+    /// for the next number instead of overwriting. `content_of` renders the file
+    /// content from the freshly allocated number, so a retry after a lost race
+    /// writes content for the number that won.
+    pub(crate) async fn create_epic_at_next(
+        &self,
+        slug: String,
+        content_of: impl Fn(u32) -> String + Send + 'static,
+    ) -> Result<DocPath, StoreError> {
         let writes = self.writes.clone();
         let root = self.root.clone();
-        let slug = slug.to_string();
-        let content = content.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
             let _guard = writes
@@ -86,6 +103,7 @@ impl DocStore {
                 let resolved = std::fs::canonicalize(&epic_dir)
                     .map_err(StoreError::Io)?
                     .join("description.md");
+                let content = content_of(number);
 
                 match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
                 {
@@ -122,10 +140,27 @@ impl DocStore {
     /// [`StoreError::AlreadyExists`], which this helper answers by re-scanning
     /// for the next number instead of overwriting.
     pub async fn create_decision(&self, slug: &str, content: &str) -> Result<DocPath, StoreError> {
+        let content = content.to_string();
+        self.create_decision_at_next(slug.to_string(), move |_| content.clone())
+            .await
+    }
+
+    /// Creates a new decision file at the next decision number, retrying with
+    /// a fresh number when a concurrent create already claimed it.
+    ///
+    /// The scan for the next number and the create run inside one write
+    /// critical section, and a lost race still surfaces as
+    /// [`StoreError::AlreadyExists`], which this helper answers by re-scanning
+    /// for the next number instead of overwriting. `content_of` renders the file
+    /// content from the freshly allocated number, so a retry after a lost race
+    /// writes content for the number that won.
+    pub(crate) async fn create_decision_at_next(
+        &self,
+        slug: String,
+        content_of: impl Fn(u32) -> String + Send + 'static,
+    ) -> Result<DocPath, StoreError> {
         let writes = self.writes.clone();
         let root = self.root.clone();
-        let slug = slug.to_string();
-        let content = content.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
             let _guard = writes
@@ -156,6 +191,7 @@ impl DocStore {
                         return Err(StoreError::NotAllowed(path.as_path().display().to_string()));
                     }
                 };
+                let content = content_of(number);
                 match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
                 {
                     Ok(_) => return Ok(path),
@@ -190,11 +226,30 @@ impl DocStore {
         slug: &str,
         content: &str,
     ) -> Result<DocPath, StoreError> {
+        let content = content.to_string();
+        self.create_ticket_at_next(epic.to_string(), slug.to_string(), move |_| content.clone())
+            .await
+    }
+
+    /// Creates a new ticket in an existing epic at the next global ticket
+    /// number, retrying with a fresh number when a concurrent create already
+    /// claimed it.
+    ///
+    /// The write goes through the atomic create path (`Expectation::Missing`),
+    /// so a lost race surfaces as [`StoreError::AlreadyExists`] and this helper
+    /// answers by re-scanning for the next number instead of overwriting. Ticket
+    /// numbers are global, so the retry scans every epic's tickets.
+    ///
+    /// `content_of` renders the file content from the freshly allocated number,
+    /// so a retry after a lost race writes content for the number that won.
+    pub(crate) async fn create_ticket_at_next(
+        &self,
+        epic: String,
+        slug: String,
+        content_of: impl Fn(u32) -> String + Send + 'static,
+    ) -> Result<DocPath, StoreError> {
         let writes = self.writes.clone();
         let root = self.root.clone();
-        let epic = epic.to_string();
-        let slug = slug.to_string();
-        let content = content.to_string();
 
         tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
             let _guard = writes
@@ -225,6 +280,7 @@ impl DocStore {
                         return Err(StoreError::NotAllowed(path.as_path().display().to_string()));
                     }
                 };
+                let content = content_of(number);
                 match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
                 {
                     Ok(_) => return Ok(path),
@@ -248,7 +304,7 @@ impl DocStore {
 
 /// The next epic number in the project tree: the highest existing epic number
 /// plus one, or `1` when the project has no epic descriptions yet.
-fn next_epic_number_at(root: &Path) -> Result<u32, StoreError> {
+pub(crate) fn next_epic_number_at(root: &Path) -> Result<u32, StoreError> {
     let epics_dir = root.join("sdlc").join("epics");
     let Ok(entries) = std::fs::read_dir(&epics_dir) else {
         return Ok(1);
@@ -278,7 +334,7 @@ fn next_epic_number_at(root: &Path) -> Result<u32, StoreError> {
 /// The next ticket number in the project tree: the global highest ticket
 /// number plus one across every epic's `tickets/` directory, or `1` when no
 /// ticket exists yet.
-fn next_ticket_number_at(root: &Path) -> Result<u32, StoreError> {
+pub(crate) fn next_ticket_number_at(root: &Path) -> Result<u32, StoreError> {
     let epics_dir = root.join("sdlc").join("epics");
     let Ok(entries) = std::fs::read_dir(&epics_dir) else {
         return Ok(1);
@@ -303,7 +359,7 @@ fn next_ticket_number_at(root: &Path) -> Result<u32, StoreError> {
 
 /// The next decision number in the project tree: the highest existing decision
 /// number plus one, or `1` when the project has no decisions yet.
-fn next_decision_number_at(root: &Path) -> Result<u32, StoreError> {
+pub(crate) fn next_decision_number_at(root: &Path) -> Result<u32, StoreError> {
     let decisions_dir = root.join("sdlc").join("decisions");
     let highest = highest_numbered(&decisions_dir);
 
@@ -313,7 +369,7 @@ fn next_decision_number_at(root: &Path) -> Result<u32, StoreError> {
 /// The highest valid numbered number among the document entries of `dir`,
 /// ignoring entries whose names are not numbered documents or that are not
 /// files.
-fn highest_numbered(dir: &Path) -> Option<u32> {
+pub(crate) fn highest_numbered(dir: &Path) -> Option<u32> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut highest: Option<u32> = None;
 
@@ -335,7 +391,7 @@ fn highest_numbered(dir: &Path) -> Option<u32> {
 
 /// The next free number: one above the highest allocated, or `1` when nothing
 /// is allocated yet; above [`MAX_NUMBER`] the sequence is exhausted.
-fn next_available(highest: Option<u32>) -> Result<u32, StoreError> {
+pub(crate) fn next_available(highest: Option<u32>) -> Result<u32, StoreError> {
     let next = highest.map_or(1, |highest| highest + 1);
     if next > MAX_NUMBER {
         return Err(StoreError::NumberExhausted { next });

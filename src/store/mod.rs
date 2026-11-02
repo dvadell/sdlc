@@ -1,15 +1,16 @@
-//! The document store (tickets 0008–0013).
+//! The document store (tickets 0008–0015).
 //!
 //! The store is the only component that touches project files. This layer
 //! establishes the validated [`DocPath`], the layout whitelist, symlink-safe
 //! resolution, content reads with a SHA-256 hash and atomic, hash-checked
-//! writes, the document tree listing and the sequential number allocation;
-//! later tickets add creation and scaffolding.
+//! writes, the document tree listing, the sequential number allocation and the
+//! creation of documents from templates; later tickets add scaffolding.
 
 pub mod frontmatter;
 pub mod layout;
 pub mod numbering;
 pub mod path;
+pub mod templates;
 pub mod tree;
 
 use std::ffi::OsStr;
@@ -46,6 +47,11 @@ pub enum StoreError {
     /// The document's bytes are not valid UTF-8.
     #[error("document is not valid UTF-8: {0}")]
     InvalidUtf8(String),
+
+    /// The document title failed validation: blank, multi-line, over-long or
+    /// not slugifiable into a file name.
+    #[error("invalid document title: {0}")]
+    InvalidTitle(String),
 
     /// The four-digit document number space is exhausted; the next allocation
     /// would need five digits.
@@ -233,6 +239,156 @@ impl DocStore {
         })
         .await
         .map_err(|err| StoreError::Io(io::Error::other(err)))?
+    }
+
+    /// Creates a document of `kind` from a built-in template (ticket 0015).
+    ///
+    /// The title is validated (trimmed, single line, at most
+    /// [`templates::MAX_TITLE_LEN`] characters) and slugified, then rendered
+    /// through the kind's template. The file is created with
+    /// [`Expectation::Missing`] so an existing document is never overwritten, and
+    /// numbered kinds allocate their next number. A ticket is created inside an
+    /// existing epic's `tickets/` directory with an optional feature binding.
+    pub async fn create(
+        &self,
+        kind: DocKind,
+        title: &str,
+        epic: Option<&str>,
+        feature: Option<&str>,
+    ) -> Result<DocPath, StoreError> {
+        let trimmed = title.trim();
+        if trimmed.is_empty()
+            || trimmed.contains('\n')
+            || trimmed.contains('\r')
+            || trimmed.chars().count() > templates::MAX_TITLE_LEN
+        {
+            return Err(StoreError::InvalidTitle(trimmed.to_string()));
+        }
+
+        let title = trimmed.to_string();
+        let slug = templates::slugify(&title)?;
+
+        match kind {
+            DocKind::Epic => {
+                self.create_epic_at_next(slug.clone(), move |number| {
+                    templates::epic_content(number, &title, &slug)
+                })
+                .await
+            }
+            DocKind::Feature => {
+                let content = templates::feature_content(&title);
+                self.create_feature(&slug, &content).await
+            }
+            DocKind::Decision => {
+                self.create_decision_at_next(slug.clone(), move |number| {
+                    templates::decision_content(number, &title)
+                })
+                .await
+            }
+            DocKind::Ticket => {
+                let epic = epic.ok_or_else(|| {
+                    StoreError::NotFound("no epic was given for a ticket".to_string())
+                })?;
+                self.ensure_ticket_epic(epic).await?;
+                if let Some(feature) = feature {
+                    self.ensure_ticket_feature(feature).await?;
+                }
+                let feature = feature.map(|feature| feature.to_string());
+                self.create_ticket_at_next(epic.to_string(), slug.clone(), move |number| {
+                    templates::ticket_content(number, &title, feature.as_deref())
+                })
+                .await
+            }
+            DocKind::Core(_) => Err(StoreError::NotAllowed(
+                "a core document cannot be created".to_string(),
+            )),
+        }
+    }
+
+    /// Creates a new feature file at the slugified title, refusing to overwrite
+    /// an existing feature through the missing-expectation write.
+    async fn create_feature(&self, slug: &str, content: &str) -> Result<DocPath, StoreError> {
+        let writes = self.writes.clone();
+        let root = self.root.clone();
+        let slug = slug.to_string();
+        let content = content.to_string();
+
+        tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
+            let _guard = writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            let path = DocPath::parse(&format!("sdlc/features/{slug}.md"))?;
+            let parent = path.as_path().parent().map(Path::to_path_buf);
+            let resolved = match parent {
+                Some(parent) => {
+                    let rooted_parent = root.join(&parent);
+                    std::fs::create_dir_all(&rooted_parent).map_err(StoreError::Io)?;
+                    let file_name = path.as_path().file_name().ok_or_else(|| {
+                        StoreError::NotAllowed(path.as_path().display().to_string())
+                    })?;
+                    std::fs::canonicalize(&rooted_parent)
+                        .map_err(StoreError::Io)?
+                        .join(file_name)
+                }
+                None => {
+                    return Err(StoreError::NotAllowed(path.as_path().display().to_string()));
+                }
+            };
+
+            crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)?;
+            Ok(path)
+        })
+        .await
+        .map_err(|err| StoreError::Io(std::io::Error::other(err)))?
+    }
+
+    /// A ticket can only be created inside an existing epic that has a
+    /// description, so the target epic directory is validated before numbering.
+    async fn ensure_ticket_epic(&self, epic: &str) -> Result<(), StoreError> {
+        let raw = format!("sdlc/epics/{epic}/description.md");
+        let path = self
+            .root
+            .join("sdlc")
+            .join("epics")
+            .join(epic)
+            .join("description.md");
+        let known = DocPath::parse(&raw)
+            .map(|path| layout::kind(path.as_path()) == Some(DocKind::Epic))
+            .unwrap_or(false)
+            && tokio::fs::metadata(&path)
+                .await
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false);
+        if known {
+            Ok(())
+        } else {
+            Err(StoreError::NotFound(format!(
+                "no epic named {epic} has a description"
+            )))
+        }
+    }
+
+    /// A ticket's optional feature binding must name an existing feature.
+    async fn ensure_ticket_feature(&self, feature: &str) -> Result<(), StoreError> {
+        let raw = format!("sdlc/features/{feature}.md");
+        let path = self
+            .root
+            .join("sdlc")
+            .join("features")
+            .join(format!("{feature}.md"));
+        let known = DocPath::parse(&raw)
+            .map(|path| layout::kind(path.as_path()) == Some(DocKind::Feature))
+            .unwrap_or(false)
+            && tokio::fs::metadata(&path)
+                .await
+                .map(|metadata| metadata.is_file())
+                .unwrap_or(false);
+        if known {
+            Ok(())
+        } else {
+            Err(StoreError::NotFound(format!("no feature named {feature}")))
+        }
     }
 }
 
@@ -836,5 +992,293 @@ mod tests {
         );
         let document = store.read(&prd_path()).await.expect("read prd");
         assert_eq!(document.content, "# First\n");
+    }
+
+    #[tokio::test]
+    async fn create_epic_writes_the_template_with_the_allocated_number() {
+        let (dir, store) = store_in_temp().await;
+
+        let path = store
+            .create(DocKind::Epic, "Document store", None, None)
+            .await
+            .expect("the epic should be created");
+
+        assert_eq!(
+            path.as_path().display().to_string(),
+            "sdlc/epics/0001-document-store/description.md"
+        );
+
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join("sdlc/epics/0001-document-store/description.md"),
+        )
+        .expect("read the epic back");
+
+        assert!(content.starts_with("---\nstatus: planned\n---\n\n"));
+        assert!(content.contains("# 0001: Document store"));
+        assert!(content.ends_with("calling the epic done.\n"));
+        assert!(
+            dir.path()
+                .join("sdlc/epics/0001-document-store/tickets")
+                .is_dir()
+        );
+    }
+
+    #[tokio::test]
+    async fn create_feature_writes_a_planned_document() {
+        let (dir, store) = store_in_temp().await;
+
+        let path = store
+            .create(DocKind::Feature, "Export", None, None)
+            .await
+            .expect("the feature should be created");
+
+        assert_eq!(
+            path.as_path().display().to_string(),
+            "sdlc/features/export.md"
+        );
+
+        let content = std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
+            .expect("read the feature back");
+
+        assert_eq!(content, "---\nstatus: planned\n---\n\n# Export\n");
+    }
+
+    #[tokio::test]
+    async fn create_decision_writes_a_proposed_document() {
+        let (dir, store) = store_in_temp().await;
+
+        let path = store
+            .create(DocKind::Decision, "Use axum", None, None)
+            .await
+            .expect("the decision should be created");
+
+        assert_eq!(
+            path.as_path().display().to_string(),
+            "sdlc/decisions/0001-use-axum.md"
+        );
+
+        let content = std::fs::read_to_string(dir.path().join("sdlc/decisions/0001-use-axum.md"))
+            .expect("read the decision back");
+
+        assert!(content.starts_with("---\nstatus: proposed\n---\n\n"));
+        assert!(content.contains("# 0001: Use axum"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_writes_it_inside_the_epic_with_the_feature() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("feature dir");
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation")).expect("epic dir");
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("epic tickets dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic description");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: shipped\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+
+        let path = store
+            .create(
+                DocKind::Ticket,
+                "Add CSV export",
+                Some("0001-foundation"),
+                Some("export"),
+            )
+            .await
+            .expect("the ticket should be created");
+
+        assert_eq!(
+            path.as_path().display().to_string(),
+            "sdlc/epics/0001-foundation/tickets/0001-add-csv-export.md"
+        );
+
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-add-csv-export.md"),
+        )
+        .expect("read the ticket back");
+
+        assert!(content.starts_with("---\nfeature: export\nstatus: todo\ndepends_on: []\n---\n\n"));
+        assert!(content.contains("# 0001: Add CSV export"));
+        assert!(!content.contains("epic:"));
+
+        let document = store.read(&path).await.expect("read the ticket back");
+        assert_eq!(document.hash, content_hash(content.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_without_a_feature_has_no_feature_key() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation")).expect("epic dir");
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("epic tickets dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic description");
+
+        let path = store
+            .create(DocKind::Ticket, "Add export", Some("0001-foundation"), None)
+            .await
+            .expect("the ticket should be created without a feature");
+
+        assert_eq!(
+            path.as_path().display().to_string(),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+
+        let content = std::fs::read_to_string(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-add-export.md"),
+        )
+        .expect("read the ticket back");
+
+        assert!(content.starts_with("---\nstatus: todo\ndepends_on: []\n---\n\n"));
+        assert!(!content.contains("feature:"));
+    }
+
+    #[tokio::test]
+    async fn create_ticket_without_an_epic_fails() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .create(DocKind::Ticket, "Add export", None, None)
+            .await
+            .expect_err("a ticket without an epic must fail");
+
+        assert!(matches!(error, StoreError::NotFound(_)), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn create_ticket_with_an_unknown_epic_fails() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .create(
+                DocKind::Ticket,
+                "Add export",
+                Some("9999-nope"),
+                Some("export"),
+            )
+            .await
+            .expect_err("an unknown epic must fail");
+
+        assert!(matches!(error, StoreError::NotFound(_)), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn create_ticket_with_an_unknown_feature_fails() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("epic tickets dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic description");
+
+        let error = store
+            .create(
+                DocKind::Ticket,
+                "Add export",
+                Some("0001-foundation"),
+                Some("nope"),
+            )
+            .await
+            .expect_err("an unknown feature must fail");
+
+        assert!(matches!(error, StoreError::NotFound(_)), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_blank_title() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .create(DocKind::Feature, "   ", None, None)
+            .await
+            .expect_err("a blank title must be rejected");
+
+        assert!(
+            matches!(error, StoreError::InvalidTitle(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_multiline_title() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .create(DocKind::Feature, "Add export\n\nMore", None, None)
+            .await
+            .expect_err("a multi-line title must be rejected");
+
+        assert!(
+            matches!(error, StoreError::InvalidTitle(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_title_longer_than_two_hundred_chars() {
+        let (_dir, store) = store_in_temp().await;
+        let long_title = "a".repeat(201);
+
+        let error = store
+            .create(DocKind::Feature, &long_title, None, None)
+            .await
+            .expect_err("an over-long title must be rejected");
+
+        assert!(
+            matches!(error, StoreError::InvalidTitle(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_a_punctuation_only_title() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .create(DocKind::Feature, "!!!", None, None)
+            .await
+            .expect_err("a punctuation-only title must be rejected");
+
+        assert!(
+            matches!(error, StoreError::InvalidTitle(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_feature_with_a_duplicate_slug_fails_without_touching_the_file() {
+        let (dir, store) = store_in_temp().await;
+
+        store
+            .create(DocKind::Feature, "Export", None, None)
+            .await
+            .expect("the first feature should be created");
+
+        let error = store
+            .create(DocKind::Feature, "export", None, None)
+            .await
+            .expect_err("a duplicate feature slug must fail");
+
+        assert!(
+            matches!(error, StoreError::AlreadyExists(_)),
+            "got {error:?}"
+        );
+
+        let content = std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
+            .expect("read the feature back");
+        assert_eq!(content, "---\nstatus: planned\n---\n\n# Export\n");
     }
 }
