@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0007", "0015", "0016", "0017"]
 ---
 
@@ -32,19 +32,19 @@ Expose the store's lifecycle operations over HTTP.
 
 ## Acceptance criteria
 
-- [ ] Each kind can be created and appears in the tree.
-- [ ] Epic creation defaults to `planned`, gets the next epic number, and its
+- [x] Each kind can be created and appears in the tree.
+- [x] Epic creation defaults to `planned`, gets the next epic number, and its
   `description.md` lands in a new directory.
-- [ ] Ticket creation without an epic → 400; unknown epic → 400/404; a
+- [x] Ticket creation without an epic → 400; unknown epic → 400/404; a
   successful ticket path is under that epic's `tickets/`.
-- [ ] Ticket with an unknown feature → 400; omitting the feature is allowed.
-- [ ] Duplicate feature creation → 409, original untouched.
-- [ ] Move validates both paths and keeps numbered prefixes; moving an epic
+- [x] Ticket with an unknown feature → 400; omitting the feature is allowed.
+- [x] Duplicate feature creation → 409, original untouched.
+- [x] Move validates both paths and keeps numbered prefixes; moving an epic
   moves its tickets with it.
-- [ ] Deleting a core document → 400 `not_allowed`.
-- [ ] Deleting a non-empty epic → 409 and nothing is removed.
-- [ ] Deleting a feature reports how many tickets reference it.
-- [ ] Scaffold is idempotent and returns created/skipped.
+- [x] Deleting a core document → 400 `not_allowed`.
+- [x] Deleting a non-empty epic → 409 and nothing is removed.
+- [x] Deleting a feature reports how many tickets reference it.
+- [x] Scaffold is idempotent and returns created/skipped.
 
 ## Tests
 

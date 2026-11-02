@@ -1,4 +1,4 @@
-//! Document read and save routes (tickets 0018, 0019).
+//! Document read, save and lifecycle routes (tickets 0018–0020).
 
 use axum::{
     Json,
@@ -6,12 +6,12 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::store::layout::DocKind;
-use crate::store::{DocEntry, DocPath, Document, Expectation, Tree};
+use crate::store::layout::{self, DocKind};
+use crate::store::{DocEntry, DocPath, Document, Expectation, StoreError, Tree};
 
 /// The tree payload the sidebar consumes.
 #[derive(Debug, Serialize)]
@@ -65,6 +65,67 @@ pub(crate) struct SaveRequest {
 pub(crate) struct SaveResponse {
     /// Lowercase hex SHA-256 of the bytes that were written.
     hash: String,
+}
+
+/// The body of a create request.
+#[derive(Debug, Deserialize)]
+pub(crate) struct CreateRequest {
+    /// The document kind: `epic`, `feature`, `decision` or `ticket`.
+    kind: String,
+    /// The title rendered into the new document.
+    title: String,
+    /// The target epic directory for a ticket.
+    #[serde(default)]
+    epic: Option<String>,
+    /// The optional feature slug for a ticket.
+    #[serde(default)]
+    feature: Option<String>,
+}
+
+/// A created document's path and content hash.
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateResponse {
+    /// The validated project-relative path of the new document.
+    path: String,
+    /// Lowercase hex SHA-256 of the content that was written.
+    hash: String,
+}
+
+/// The body of a move request.
+#[derive(Debug, Deserialize)]
+pub(crate) struct MoveRequest {
+    /// The existing document path.
+    from: String,
+    /// The destination document path.
+    to: String,
+}
+
+/// The result of a move.
+#[derive(Debug, Serialize)]
+pub(crate) struct MoveResponse {
+    /// The validated project-relative path after the move.
+    path: String,
+}
+
+/// The result of a delete.
+#[derive(Debug, Serialize)]
+pub(crate) struct DeleteResponse {
+    /// Tickets left pointing at a deleted feature; only present for a feature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    orphaned_tickets: Option<usize>,
+}
+
+/// The empty JSON object accepted by the scaffold route.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ScaffoldRequest {}
+
+/// The files created and skipped by a scaffold run.
+#[derive(Debug, Serialize)]
+pub(crate) struct ScaffoldResponse {
+    /// Starter files that did not exist and were created.
+    created: Vec<String>,
+    /// Starter files that already existed and were skipped.
+    skipped: Vec<String>,
 }
 
 impl From<Tree> for TreeResponse {
@@ -139,7 +200,7 @@ pub(crate) async fn put_doc(
     let SaveRequest {
         content,
         expected_hash,
-    } = save_request(body)?;
+    } = json_body(body)?;
     ensure_expected_hash(&expected_hash)?;
 
     let hash = state
@@ -150,22 +211,158 @@ pub(crate) async fn put_doc(
     Ok(Json(SaveResponse { hash }))
 }
 
+/// Handles `POST /api/docs`.
+///
+/// The kind and any path-shaped references are validated before the store is
+/// called. A ticket needs an epic directory; its feature binding is optional.
+pub(crate) async fn create_doc(
+    State(state): State<AppState>,
+    body: Result<Json<CreateRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<CreateResponse>), ApiError> {
+    let request = json_body(body)?;
+    let kind = parse_kind(&request.kind)?;
+    let epic = non_blank(request.epic.as_deref());
+    let feature = non_blank(request.feature.as_deref());
+
+    if kind == DocKind::Ticket {
+        let epic = epic.ok_or_else(ApiError::bad_request)?;
+        ensure_epic_reference(epic)?;
+        if let Some(feature) = feature {
+            ensure_feature_reference(feature)?;
+        }
+    }
+
+    let created = state
+        .store
+        .create(kind, &request.title, epic, feature)
+        .await
+        .map_err(|error| map_create_error(kind, feature.is_some(), error))?;
+    let document = state.store.read(&created).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateResponse {
+            path: path_string(&created),
+            hash: document.hash,
+        }),
+    ))
+}
+
+/// Handles `POST /api/docs/move`.
+///
+/// Both paths become a [`DocPath`] before the store sees them, so a traversal
+/// or a missing source/destination never reaches the filesystem.
+pub(crate) async fn move_doc(
+    State(state): State<AppState>,
+    body: Result<Json<MoveRequest>, JsonRejection>,
+) -> Result<Json<MoveResponse>, ApiError> {
+    let request = json_body(body)?;
+    let from = DocPath::parse(&request.from)?;
+    let to = DocPath::parse(&request.to)?;
+    let moved = state.store.rename(&from, &to).await?;
+
+    Ok(Json(MoveResponse {
+        path: path_string(&moved),
+    }))
+}
+
+/// Handles `DELETE /api/docs/{*path}`.
+pub(crate) async fn delete_doc(
+    State(state): State<AppState>,
+    Path(raw): Path<String>,
+) -> Result<Json<DeleteResponse>, ApiError> {
+    let path = parse_captured_path(&raw)?;
+    let report = state.store.delete(&path).await?;
+    let orphaned_tickets =
+        (layout::kind(path.as_path()) == Some(DocKind::Feature)).then_some(report.orphaned_tickets);
+
+    Ok(Json(DeleteResponse { orphaned_tickets }))
+}
+
+/// Handles `POST /api/scaffold`.
+pub(crate) async fn scaffold(
+    State(state): State<AppState>,
+    body: Result<Json<ScaffoldRequest>, JsonRejection>,
+) -> Result<Json<ScaffoldResponse>, ApiError> {
+    let _request: ScaffoldRequest = json_body(body)?;
+    let report = state.store.scaffold().await?;
+
+    Ok(Json(ScaffoldResponse {
+        created: report.created,
+        skipped: report.skipped,
+    }))
+}
+
 /// Converts a JSON body rejection into the shared error envelope.
 ///
-/// Axum's own 413 body is plain text, so an oversized save is rebuilt as an
+/// Axum's own 413 body is plain text, so an oversized request is rebuilt as an
 /// [`ApiError`] to keep the API error shape uniform. Other body failures are
 /// client errors with a short message.
-fn save_request(body: Result<Json<SaveRequest>, JsonRejection>) -> Result<SaveRequest, ApiError> {
+fn json_body<T: DeserializeOwned>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     match body {
         Ok(Json(request)) => Ok(request),
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
             Err(ApiError::payload_too_large())
         }
         Err(rejection) => {
-            tracing::warn!(status = %rejection.status(), "save request body rejected");
+            tracing::warn!(status = %rejection.status(), "request body rejected");
             Err(ApiError::bad_request())
         }
     }
+}
+
+/// Parses the stable JSON name of a creatable document kind.
+fn parse_kind(raw: &str) -> Result<DocKind, ApiError> {
+    match raw {
+        "epic" => Ok(DocKind::Epic),
+        "feature" => Ok(DocKind::Feature),
+        "decision" => Ok(DocKind::Decision),
+        "ticket" => Ok(DocKind::Ticket),
+        _ => Err(ApiError::bad_request()),
+    }
+}
+
+/// The trimmed non-blank value of an optional reference field.
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Validates an epic directory reference syntactically, before the store runs.
+fn ensure_epic_reference(epic: &str) -> Result<(), ApiError> {
+    let path = DocPath::parse(&format!("sdlc/epics/{epic}/description.md"))?;
+    if layout::kind(path.as_path()) == Some(DocKind::Epic) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request())
+    }
+}
+
+/// Validates a feature slug reference syntactically, before the store runs.
+fn ensure_feature_reference(feature: &str) -> Result<(), ApiError> {
+    let path = DocPath::parse(&format!("sdlc/features/{feature}.md"))?;
+    if layout::kind(path.as_path()) == Some(DocKind::Feature) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request())
+    }
+}
+
+/// Maps a create failure to its HTTP status.
+///
+/// A missing feature binding is invalid input (400), while a missing epic is a
+/// missing document (404); both are reported by the store as `NotFound`, so a
+/// ticket carrying a feature maps that case to 400.
+fn map_create_error(kind: DocKind, feature_given: bool, error: StoreError) -> ApiError {
+    if kind == DocKind::Ticket && feature_given && matches!(&error, StoreError::NotFound(_)) {
+        ApiError::bad_request()
+    } else {
+        ApiError::from(error)
+    }
+}
+
+/// The validated path as the JSON string clients round-trip.
+fn path_string(path: &DocPath) -> String {
+    path.as_path().to_string_lossy().into_owned()
 }
 
 /// Rejects a missing or whitespace-only expected hash before any disk access.
