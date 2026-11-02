@@ -5,6 +5,7 @@
 //! resolution, content reads with a SHA-256 hash and atomic, hash-checked
 //! writes; later tickets add creation, listing and scaffolding.
 
+pub mod frontmatter;
 pub mod layout;
 pub mod path;
 

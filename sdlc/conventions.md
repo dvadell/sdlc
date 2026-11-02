@@ -13,7 +13,7 @@
 | Upstream SSE parsing | `eventsource-stream` | Parses the AI provider's stream |
 | CLI | `clap` (derive) | Flags and env var handling |
 | Serialization | `serde`, `serde_json` | |
-| Front matter | A maintained YAML crate with serde support | `serde_yaml` is archived; check what is current before choosing, and record it as a decision |
+| Front matter | `serde_yaml_ng` | Managed YAML with serde support; the archived `serde_yaml` is not used (ADR 0009) |
 | Diffs | `similar` | Unified diffs for proposals |
 | Hashing | `sha2` | Content hashes for conflict detection |
 | File watching | `notify` with a debouncer | |

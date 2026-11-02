@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0001"]
 ---
 
@@ -44,13 +44,13 @@ tickets without making the document unreadable when the YAML is wrong.
 
 ## Acceptance criteria
 
-- [ ] Valid front matter for all four kinds parses.
-- [ ] No front matter → no status, no error.
-- [ ] Malformed YAML → warning, document still listed and editable.
-- [ ] `---` inside the body or a horizontal rule is not treated as the closing
+- [x] Valid front matter for all four kinds parses.
+- [x] No front matter → no status, no error.
+- [x] Malformed YAML → warning, document still listed and editable.
+- [x] `---` inside the body or a horizontal rule is not treated as the closing
   marker.
-- [ ] An unknown status is treated as absent with a warning naming the file.
-- [ ] The crate choice is recorded in a decision file.
+- [x] An unknown status is treated as absent with a warning naming the file.
+- [x] The crate choice is recorded in a decision file.
 
 ## Tests
 
