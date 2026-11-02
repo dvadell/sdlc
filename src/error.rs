@@ -72,6 +72,15 @@ impl ApiError {
         Self::fixed(StatusCode::FORBIDDEN, "forbidden", "forbidden")
     }
 
+    /// Builds a `413 Payload Too Large` error.
+    pub fn payload_too_large() -> Self {
+        Self::fixed(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "payload too large",
+        )
+    }
+
     /// Builds a `415 Unsupported Media Type` error.
     pub fn unsupported_media_type() -> Self {
         Self::fixed(
@@ -237,6 +246,32 @@ mod tests {
             "unsupported_media_type",
             "unsupported media type",
         );
+    }
+
+    #[test]
+    fn payload_too_large_response_matches_the_error_contract() {
+        assert_error_contract(
+            ApiError::payload_too_large(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "payload too large",
+        );
+    }
+
+    #[test]
+    fn conflict_error_body_does_not_contain_a_path() {
+        let err = ApiError::from(StoreError::Conflict {
+            current_hash: "/home/person/project/sdlc/PRD.md".to_string(),
+        });
+
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        assert_eq!(err.code, "conflict");
+        let body = serde_json::to_string(&err.envelope()).expect("error body should serialize");
+        assert_eq!(
+            body,
+            r#"{"error":{"code":"conflict","message":"conflict"}}"#
+        );
+        assert!(!body.contains("/home/person"));
     }
 
     #[test]

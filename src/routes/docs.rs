@@ -1,17 +1,17 @@
-//! Read routes for the document tree and document content (ticket 0018).
+//! Document read and save routes (tickets 0018, 0019).
 
 use axum::{
     Json,
-    extract::{Path, State},
-    http::{HeaderValue, header},
+    extract::{Path, State, rejection::JsonRejection},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
 use crate::store::layout::DocKind;
-use crate::store::{DocEntry, DocPath, Document, Tree};
+use crate::store::{DocEntry, DocPath, Document, Expectation, Tree};
 
 /// The tree payload the sidebar consumes.
 #[derive(Debug, Serialize)]
@@ -48,6 +48,22 @@ struct DocResponse {
     /// The document content, byte-for-byte as UTF-8 text.
     content: String,
     /// Lowercase hex SHA-256 of the content bytes.
+    hash: String,
+}
+
+/// The body of a save request.
+#[derive(Debug, Deserialize)]
+pub(crate) struct SaveRequest {
+    /// The replacement content.
+    content: String,
+    /// The hash the client last saw, checked before overwriting.
+    expected_hash: String,
+}
+
+/// The result of a save.
+#[derive(Debug, Serialize)]
+pub(crate) struct SaveResponse {
+    /// Lowercase hex SHA-256 of the bytes that were written.
     hash: String,
 }
 
@@ -110,6 +126,57 @@ pub async fn get_doc(
     Ok(no_store(Json(DocResponse::from(document))))
 }
 
+/// Handles `PUT /api/docs/{*path}`.
+///
+/// The path is parsed first and a blank expected hash is rejected before the
+/// store is called, so neither failure touches the disk.
+pub(crate) async fn put_doc(
+    State(state): State<AppState>,
+    Path(raw): Path<String>,
+    body: Result<Json<SaveRequest>, JsonRejection>,
+) -> Result<Json<SaveResponse>, ApiError> {
+    let path = parse_captured_path(&raw)?;
+    let SaveRequest {
+        content,
+        expected_hash,
+    } = save_request(body)?;
+    ensure_expected_hash(&expected_hash)?;
+
+    let hash = state
+        .store
+        .write(&path, &content, &Expectation::Existing(expected_hash))
+        .await?;
+
+    Ok(Json(SaveResponse { hash }))
+}
+
+/// Converts a JSON body rejection into the shared error envelope.
+///
+/// Axum's own 413 body is plain text, so an oversized save is rebuilt as an
+/// [`ApiError`] to keep the API error shape uniform. Other body failures are
+/// client errors with a short message.
+fn save_request(body: Result<Json<SaveRequest>, JsonRejection>) -> Result<SaveRequest, ApiError> {
+    match body {
+        Ok(Json(request)) => Ok(request),
+        Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            Err(ApiError::payload_too_large())
+        }
+        Err(rejection) => {
+            tracing::warn!(status = %rejection.status(), "save request body rejected");
+            Err(ApiError::bad_request())
+        }
+    }
+}
+
+/// Rejects a missing or whitespace-only expected hash before any disk access.
+fn ensure_expected_hash(expected_hash: &str) -> Result<(), ApiError> {
+    if expected_hash.trim().is_empty() {
+        Err(ApiError::bad_request())
+    } else {
+        Ok(())
+    }
+}
+
 /// Parses a wildcard capture into a [`DocPath`].
 ///
 /// Axum 0.8 normally captures a wildcard without its leading slash, but the
@@ -167,5 +234,16 @@ mod tests {
         assert_eq!(kind_name(DocKind::Feature), "feature");
         assert_eq!(kind_name(DocKind::Decision), "decision");
         assert_eq!(kind_name(DocKind::Ticket), "ticket");
+    }
+
+    #[test]
+    fn rejects_blank_expected_hashes() {
+        for hash in ["", " ", "\t\n"] {
+            let error = ensure_expected_hash(hash).expect_err("a blank hash must be rejected");
+
+            assert_eq!(error.to_string(), "bad request");
+        }
+
+        assert!(ensure_expected_hash("abc").is_ok());
     }
 }

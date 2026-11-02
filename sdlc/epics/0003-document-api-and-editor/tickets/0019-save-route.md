@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0007", "0011"]
 ---
 
@@ -29,13 +29,13 @@ conflict instead of clobbering an external edit.
 
 ## Acceptance criteria
 
-- [ ] Correct hash saves and returns the new hash.
-- [ ] The response hash is computed from the bytes written.
-- [ ] Stale hash → 409 and the file is unchanged.
-- [ ] Missing document → 404; invalid path → 400.
-- [ ] Empty `expected_hash` → 400 before touching disk.
-- [ ] Oversized body → 413 with the standard error shape.
-- [ ] Content type other than JSON → 415 from the guard.
+- [x] Correct hash saves and returns the new hash.
+- [x] The response hash is computed from the bytes written.
+- [x] Stale hash → 409 and the file is unchanged.
+- [x] Missing document → 404; invalid path → 400.
+- [x] Empty `expected_hash` → 400 before touching disk.
+- [x] Oversized body → 413 with the standard error shape.
+- [x] Content type other than JSON → 415 from the guard.
 
 ## Tests
 
