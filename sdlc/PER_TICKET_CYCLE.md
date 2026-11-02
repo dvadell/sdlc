@@ -30,4 +30,9 @@
   `git status` / `git diff` before committing; untracked files under `tests/` may be
   half-finished solver output and must be reviewed before being committed.
 
+- `ocr review` can fail transiently with network errors partway through a review
+  (observed on ticket 0015: the run failed and the retry with `--resume` completed
+  cleanly). When a review fails, re-run the same command with `--resume <session-id>`
+  before assuming the code has a problem.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
