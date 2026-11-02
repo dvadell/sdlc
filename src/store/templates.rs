@@ -1,9 +1,12 @@
-//! Starter templates for document creation (ticket 0015).
+//! Starter templates for document creation (tickets 0015 and 0017).
 //!
 //! The epic, decision and ticket templates are normative in `sdlc/conventions.md`
 //! section 9; the feature template follows the same front matter and single H1
 //! rules. Titles are rendered into the H1 only, never into the YAML front matter,
-//! so a title can never inject YAML or break the block.
+//! so a title can never inject YAML or break the block. The scaffold templates
+//! of ticket 0017 are short starter files with one H1 and obvious TODO sections,
+//! and the PRD template keeps the empty feature index region between the
+//! markers owned by the index writer (ticket 0028).
 
 use crate::store::StoreError;
 
@@ -79,6 +82,34 @@ pub fn slugify(title: &str) -> Result<String, StoreError> {
     Ok(slug)
 }
 
+/// The starter PRD content for a scaffolded project (ticket 0017).
+///
+/// The document carries one H1, a short purpose section and the empty feature
+/// index region between the markers owned by the index writer (ticket 0028),
+/// which later fills the region from the feature files.
+pub fn prd_content() -> String {
+    format!(
+        "# Product Requirements Document\n\n## Purpose\n\nTODO: write the purpose of this document in one or two short paragraphs.\n\n{}\n{}\n",
+        crate::store::index::FEATURE_INDEX_START,
+        crate::store::index::FEATURE_INDEX_END,
+    )
+}
+
+/// The starter architecture content for a scaffolded project (ticket 0017).
+pub fn architecture_content() -> String {
+    "# Architecture\n\nTODO: describe the components and how they communicate.\n".to_string()
+}
+
+/// The starter conventions content for a scaffolded project (ticket 0017).
+pub fn conventions_content() -> String {
+    "# Conventions\n\nTODO: record the coding conventions for this project.\n".to_string()
+}
+
+/// The starter AI rules content for a scaffolded project (ticket 0017).
+pub fn agents_content() -> String {
+    "# sdlc\n\nTODO: record the rules this project gives its AI coding assistant.\n".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +179,72 @@ mod tests {
 
         assert!(without_feature.starts_with("---\nstatus: todo\ndepends_on: []\n---\n\n"));
         assert!(!without_feature.contains("feature:"));
+    }
+
+    // ------------------------------------------------------------------
+    // Ticket 0017: scaffold starter templates
+
+    fn heading_level(line: &str) -> Option<usize> {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            return None;
+        }
+        let level = trimmed.len() - trimmed.trim_start_matches('#').len();
+        let rest = &trimmed[level..];
+        if !rest.is_empty() && !rest.starts_with(' ') {
+            // A `###` deeper heading is not an ATX heading of that level.
+            return None;
+        }
+        Some(level)
+    }
+
+    fn atx_heading_count(content: &str) -> Vec<usize> {
+        content.lines().filter_map(heading_level).collect()
+    }
+
+    #[test]
+    fn scaffold_prd_has_one_h1_purpose_and_an_empty_index_region() {
+        let content = prd_content();
+
+        let headings = atx_heading_count(&content);
+        assert_eq!(
+            headings.iter().filter(|level| **level == 1).count(),
+            1,
+            "content: {content}"
+        );
+        assert_eq!(headings.iter().filter(|level| **level == 2).count(), 1);
+        assert!(content.contains("# Product Requirements Document"));
+        assert!(content.contains("## Purpose"));
+        assert!(
+            content
+                .lines()
+                .any(|line| line == crate::store::index::FEATURE_INDEX_START)
+        );
+        assert!(
+            content
+                .lines()
+                .any(|line| line == crate::store::index::FEATURE_INDEX_END)
+        );
+        assert_eq!(
+            content.matches("<!-- sdlc:feature-index:start -->").count(),
+            1
+        );
+        assert_eq!(
+            content.matches("<!-- sdlc:feature-index:end -->").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn scaffold_architecture_conventions_and_agents_have_exactly_one_h1() {
+        for content in [
+            architecture_content(),
+            conventions_content(),
+            agents_content(),
+        ] {
+            assert_eq!(atx_heading_count(&content), vec![1], "content: {content}");
+            assert!(content.ends_with('\n'), "content: {content}");
+            assert!(!content.ends_with("\n\n"));
+        }
     }
 }

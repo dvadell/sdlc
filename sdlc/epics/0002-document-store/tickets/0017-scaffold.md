@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0011", "0015"]
 ---
 
@@ -35,13 +35,13 @@ without ever overwriting a file the person already has.
 
 ## Acceptance criteria
 
-- [ ] Empty project gets all core files and the three top-level directories.
-- [ ] A second call creates nothing and reports the existing files as skipped.
-- [ ] A pre-existing `sdlc/PRD.md` is byte-identical afterwards.
-- [ ] A partial layout only fills the gaps.
-- [ ] The PRD markers are exactly the strings 0028 will look for.
-- [ ] Every starter file is valid Markdown with exactly one H1.
-- [ ] Scaffold creates no `sdlc/tickets/` directory and no fake epic.
+- [x] Empty project gets all core files and the three top-level directories.
+- [x] A second call creates nothing and reports the existing files as skipped.
+- [x] A pre-existing `sdlc/PRD.md` is byte-identical afterwards.
+- [x] A partial layout only fills the gaps.
+- [x] The PRD markers are exactly the strings 0028 will look for.
+- [x] Every starter file is valid Markdown with exactly one H1.
+- [x] Scaffold creates no `sdlc/tickets/` directory and no fake epic.
 
 ## Tests
 

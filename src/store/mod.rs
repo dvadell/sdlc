@@ -1,15 +1,18 @@
-//! The document store (tickets 0008–0015).
+//! The document store (tickets 0008–0017).
 //!
 //! The store is the only component that touches project files. This layer
 //! establishes the validated [`DocPath`], the layout whitelist, symlink-safe
 //! resolution, content reads with a SHA-256 hash and atomic, hash-checked
 //! writes, the document tree listing, the sequential number allocation and the
-//! creation of documents from templates; later tickets add scaffolding.
+//! creation of documents from templates and the scaffold of the starter layout;
+//! later tickets add the PRD feature index writer.
 
 pub mod frontmatter;
+pub mod index;
 pub mod layout;
 pub mod numbering;
 pub mod path;
+pub mod scaffold;
 pub mod templates;
 pub mod tree;
 
@@ -83,6 +86,7 @@ pub enum StoreError {
 pub use layout::{CoreDoc, DocKind};
 pub use numbering::{format_decision_name, format_epic_name, format_ticket_name};
 pub use path::DocPath;
+pub use scaffold::ScaffoldReport;
 pub use tree::{DocEntry, Tree};
 
 /// How [`DocStore::resolve`] treats the target's existence.

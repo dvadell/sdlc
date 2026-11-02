@@ -45,6 +45,7 @@ sdlc/
       layout.rs             # what paths are valid documents
       frontmatter.rs
       index.rs              # PRD feature index rewriting
+      scaffold.rs           # starter layout scaffolding
       templates.rs          # starter files
     watch.rs                # file watcher + event hub
     chat/
