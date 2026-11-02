@@ -78,14 +78,15 @@ impl DocStore {
                     Err(error) => return Err(error),
                 };
                 let epic_name = format_epic_name(number, &slug);
+                let path = DocPath::parse(&format!("sdlc/epics/{epic_name}/description.md"))?;
                 let epic_dir = root.join("sdlc").join("epics").join(&epic_name);
+                let epic_dir_existed = epic_dir.exists();
                 std::fs::create_dir_all(&epic_dir).map_err(StoreError::Io)?;
                 std::fs::create_dir_all(epic_dir.join("tickets")).map_err(StoreError::Io)?;
-                let resolved = std::fs::canonicalize(epic_dir)
+                let resolved = std::fs::canonicalize(&epic_dir)
                     .map_err(StoreError::Io)?
                     .join("description.md");
 
-                let path = DocPath::parse(&format!("sdlc/epics/{epic_name}/description.md"))?;
                 match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
                 {
                     Ok(_) => return Ok(path),
@@ -94,7 +95,14 @@ impl DocStore {
                             "sdlc/epics/{epic_name}/description.md"
                         )));
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        // The epic directories were created by this attempt and
+                        // the write failed, so drop the orphaned directories.
+                        if !epic_dir_existed {
+                            let _ = std::fs::remove_dir_all(&epic_dir);
+                        }
+                        return Err(error);
+                    }
                 }
             }
 
@@ -135,10 +143,14 @@ impl DocStore {
                 let parent = path.as_path().parent().map(Path::to_path_buf);
                 let resolved = match parent {
                     Some(parent) => {
-                        std::fs::create_dir_all(&parent).map_err(StoreError::Io)?;
-                        std::fs::canonicalize(root.join(&parent))
+                        let rooted_parent = root.join(&parent);
+                        std::fs::create_dir_all(&rooted_parent).map_err(StoreError::Io)?;
+                        let file_name = path.as_path().file_name().ok_or_else(|| {
+                            StoreError::NotAllowed(path.as_path().display().to_string())
+                        })?;
+                        std::fs::canonicalize(&rooted_parent)
                             .map_err(StoreError::Io)?
-                            .join(path.as_path().file_name().unwrap_or_default())
+                            .join(file_name)
                     }
                     None => {
                         return Err(StoreError::NotAllowed(path.as_path().display().to_string()));
@@ -200,10 +212,14 @@ impl DocStore {
                 let parent = path.as_path().parent().map(Path::to_path_buf);
                 let resolved = match parent {
                     Some(parent) => {
-                        std::fs::create_dir_all(&parent).map_err(StoreError::Io)?;
-                        std::fs::canonicalize(root.join(&parent))
+                        let rooted_parent = root.join(&parent);
+                        std::fs::create_dir_all(&rooted_parent).map_err(StoreError::Io)?;
+                        let file_name = path.as_path().file_name().ok_or_else(|| {
+                            StoreError::NotAllowed(path.as_path().display().to_string())
+                        })?;
+                        std::fs::canonicalize(&rooted_parent)
                             .map_err(StoreError::Io)?
-                            .join(path.as_path().file_name().unwrap_or_default())
+                            .join(file_name)
                     }
                     None => {
                         return Err(StoreError::NotAllowed(path.as_path().display().to_string()));
@@ -277,7 +293,7 @@ fn next_ticket_number_at(root: &Path) -> Result<u32, StoreError> {
             continue;
         }
         let tickets_dir = entry.path().join("tickets");
-        if let Some(number) = highest_numbered(&tickets_dir, true) {
+        if let Some(number) = highest_numbered(&tickets_dir) {
             highest = Some(highest.map_or(number, |max| max.max(number)));
         }
     }
@@ -289,15 +305,15 @@ fn next_ticket_number_at(root: &Path) -> Result<u32, StoreError> {
 /// number plus one, or `1` when the project has no decisions yet.
 fn next_decision_number_at(root: &Path) -> Result<u32, StoreError> {
     let decisions_dir = root.join("sdlc").join("decisions");
-    let highest = highest_numbered(&decisions_dir, true);
+    let highest = highest_numbered(&decisions_dir);
 
     next_available(highest)
 }
 
 /// The highest valid numbered number among the document entries of `dir`,
-/// ignoring entries whose names are not numbered documents and, when `file_only`
-/// is set, entries that are not files.
-fn highest_numbered(dir: &Path, file_only: bool) -> Option<u32> {
+/// ignoring entries whose names are not numbered documents or that are not
+/// files.
+fn highest_numbered(dir: &Path) -> Option<u32> {
     let entries = std::fs::read_dir(dir).ok()?;
     let mut highest: Option<u32> = None;
 
@@ -305,7 +321,7 @@ fn highest_numbered(dir: &Path, file_only: bool) -> Option<u32> {
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if file_only && !file_type.is_file() {
+        if !file_type.is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
