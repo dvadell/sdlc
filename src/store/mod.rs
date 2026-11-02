@@ -96,6 +96,12 @@ impl Expectation {
 #[derive(Debug, Clone)]
 pub struct DocStore {
     root: PathBuf,
+    /// Serializes the check-then-write sequence of saves, so two concurrent
+    /// writers cannot both pass an expectation check and rename.
+    ///
+    /// Invariant: a single store instance owns a single project root; create
+    /// one [`DocStore`] per root and share the [`Arc`] across tasks.
+    writes: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 impl DocStore {
@@ -105,7 +111,10 @@ impl DocStore {
     /// directory that is itself reached through a symlink works normally.
     pub fn new(root: PathBuf) -> Result<Self, StoreError> {
         let root = root.canonicalize()?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            writes: std::sync::Arc::new(std::sync::Mutex::new(())),
+        })
     }
 
     /// Resolves a validated document path to an absolute path inside the root.
@@ -198,16 +207,29 @@ impl DocStore {
         let owned_content = content.to_string();
         let owned_expectation = expectation.clone();
 
+        let writes = self.writes.clone();
+
         tokio::task::spawn_blocking(move || -> Result<String, StoreError> {
+            // The expectation check and the write are one critical section, so
+            // two concurrent writers cannot both pass a check and rename. The
+            // guard is only held inside the blocking task, never across an
+            // `.await`.
+            let _guard = writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
             let new_hash = content_hash(owned_content.as_bytes());
 
             match owned_expectation {
                 Expectation::Existing(hash) => {
-                    let current = read_document(&resolved, &owned)?;
-                    if current.hash != hash.as_str() {
-                        return Err(StoreError::Conflict {
-                            current_hash: current.hash,
-                        });
+                    // Hash the raw bytes: comparing the decoded string would turn
+                    // externally rewritten non-UTF-8 content into an `InvalidUtf8`
+                    // instead of the documented `Conflict` carrying the disk hash.
+                    let current_bytes = std::fs::read(&resolved)
+                        .map_err(|source| map_read_error(&owned, source))?;
+                    let current_hash = content_hash(&current_bytes);
+                    if current_hash != hash.as_str() {
+                        return Err(StoreError::Conflict { current_hash });
                     }
                     write_atomic(&resolved, owned_content.as_bytes())?;
                 }
@@ -268,6 +290,10 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         file.write_all(bytes)?;
         file.sync_all()?;
 
+        // The handle must be released before the rename: on Windows an open
+        // source file blocks the replace operation.
+        drop(file);
+
         // A rename keeps the temp file's mode, which is the platform default
         // for a newly created file. Copy the replaced file's mode first, so
         // overwriting never widens permissions beyond what the file had.
@@ -276,6 +302,12 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), StoreError> {
         }
 
         std::fs::rename(&temp, target)?;
+        // A directory fsync that fails after a successful rename does not
+        // invalidate the write; treat it as a durability warning, not an error.
+        if let Err(err) = sync_parent_dir(parent) {
+            tracing::warn!(error = %err, "failed to sync parent directory after rename");
+        }
+
         Ok(())
     })();
 
@@ -305,10 +337,31 @@ fn temp_path(dir: &Path, file_name: &OsStr) -> PathBuf {
     ))
 }
 
-/// Monotonic temp file suffix so concurrent writes never reuse a temp path.
-fn temp_suffix() -> u64 {
+/// Temp file suffix combining a per-process sequence with the process id, so
+/// writes from different processes cannot reuse a temp name.
+fn temp_suffix() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    format!("{}-{}", sequence, std::process::id())
+}
+
+/// Syncs the directory that received a rename so the new entry survives a crash.
+///
+/// A rename updates a directory entry, which is not covered by syncing the
+/// file itself, so the parent directory is synced afterwards. Directory fsync
+/// is not portable through `std` on every platform, so other platforms skip it
+/// and rely on the atomic rename alone.
+#[cfg(unix)]
+fn sync_parent_dir(dir: &Path) -> Result<(), StoreError> {
+    let file = std::fs::File::open(dir)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_dir: &Path) -> Result<(), StoreError> {
+    Ok(())
 }
 
 /// Builds the path-shaped error used for every rejected resolution.
