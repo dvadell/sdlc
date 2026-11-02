@@ -324,15 +324,7 @@ fn humanize(file: &str) -> String {
 /// The numeric prefix of a numbered document name such as `0007-add-export`,
 /// or `0` when the name is not numbered.
 fn numbered_prefix(name: &str) -> u32 {
-    let stem = name.strip_suffix(".md").unwrap_or(name);
-    match stem.split_once('-') {
-        Some((prefix, _))
-            if prefix.len() == 4 && prefix.bytes().all(|byte| byte.is_ascii_digit()) =>
-        {
-            prefix.parse().unwrap_or(0)
-        }
-        _ => 0,
-    }
+    layout::numbered_number(name).unwrap_or(0)
 }
 
 #[cfg(test)]

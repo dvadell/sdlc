@@ -3,11 +3,12 @@
 //! The store is the only component that touches project files. This layer
 //! establishes the validated [`DocPath`], the layout whitelist, symlink-safe
 //! resolution, content reads with a SHA-256 hash and atomic, hash-checked
-//! writes, and the document tree listing; later tickets add creation and
-//! scaffolding.
+//! writes, the document tree listing and the sequential number allocation;
+//! later tickets add creation and scaffolding.
 
 pub mod frontmatter;
 pub mod layout;
+pub mod numbering;
 pub mod path;
 pub mod tree;
 
@@ -46,12 +47,18 @@ pub enum StoreError {
     #[error("document is not valid UTF-8: {0}")]
     InvalidUtf8(String),
 
+    /// The four-digit document number space is exhausted; the next allocation
+    /// would need five digits.
+    #[error("no document numbers remain; the next number would be {next}")]
+    NumberExhausted { next: u32 },
+
     /// A filesystem operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
 pub use layout::{CoreDoc, DocKind};
+pub use numbering::{format_decision_name, format_epic_name, format_ticket_name};
 pub use path::DocPath;
 pub use tree::{DocEntry, Tree};
 
@@ -222,36 +229,53 @@ impl DocStore {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-            let new_hash = content_hash(owned_content.as_bytes());
-
-            match owned_expectation {
-                Expectation::Existing(hash) => {
-                    // Hash the raw bytes: comparing the decoded string would turn
-                    // externally rewritten non-UTF-8 content into an `InvalidUtf8`
-                    // instead of the documented `Conflict` carrying the disk hash.
-                    let current_bytes = std::fs::read(&resolved)
-                        .map_err(|source| map_read_error(&owned, source))?;
-                    let current_hash = content_hash(&current_bytes);
-                    if current_hash != hash.as_str() {
-                        return Err(StoreError::Conflict { current_hash });
-                    }
-                    write_atomic(&resolved, owned_content.as_bytes())?;
-                }
-                Expectation::Missing => {
-                    if path_exists(&resolved)? {
-                        return Err(StoreError::AlreadyExists(
-                            owned.as_path().display().to_string(),
-                        ));
-                    }
-                    write_atomic(&resolved, owned_content.as_bytes())?;
-                }
-            }
-
-            Ok(new_hash)
+            save_critical(&resolved, &owned, &owned_content, &owned_expectation)
         })
         .await
         .map_err(|err| StoreError::Io(io::Error::other(err)))?
     }
+}
+
+/// The atomic check-and-write critical section, invoked with the store's write
+/// lock held.
+///
+/// The expectation decides what the caller saw before writing: an `Existing`
+/// hash replaces the content only while the file on disk still hashes to it,
+/// and a `Missing` expectation creates the file while refusing to overwrite
+/// anything that is already there. The bytes land in a synced temp file that is
+/// renamed over the target, so a failure never leaves a partial document behind.
+fn save_critical(
+    resolved: &Path,
+    owned: &DocPath,
+    owned_content: &str,
+    owned_expectation: &Expectation,
+) -> Result<String, StoreError> {
+    let new_hash = content_hash(owned_content.as_bytes());
+
+    match owned_expectation {
+        Expectation::Existing(hash) => {
+            // Hash the raw bytes: comparing the decoded string would turn
+            // externally rewritten non-UTF-8 content into an `InvalidUtf8`
+            // instead of the documented `Conflict` carrying the disk hash.
+            let current_bytes =
+                std::fs::read(resolved).map_err(|source| map_read_error(owned, source))?;
+            let current_hash = content_hash(&current_bytes);
+            if current_hash != hash.as_str() {
+                return Err(StoreError::Conflict { current_hash });
+            }
+            write_atomic(resolved, owned_content.as_bytes())?;
+        }
+        Expectation::Missing => {
+            if path_exists(resolved)? {
+                return Err(StoreError::AlreadyExists(
+                    owned.as_path().display().to_string(),
+                ));
+            }
+            write_atomic(resolved, owned_content.as_bytes())?;
+        }
+    }
+
+    Ok(new_hash)
 }
 
 /// Reads the file at an already-resolved path into a [`Document`].

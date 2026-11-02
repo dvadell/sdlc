@@ -105,6 +105,21 @@ fn is_numbered_slug(value: &str) -> bool {
     prefix.len() == 4 && prefix.bytes().all(|byte| byte.is_ascii_digit()) && is_kebab(slug)
 }
 
+/// The numeric prefix of a numbered document name such as `0007-add-export` or
+/// `0007-add-export.md`, or `None` when the name is not a numbered document.
+///
+/// The prefix is parsed as a number, not compared lexically, so `0009` sorts
+/// before `0010` when finding the highest allocated number.
+pub fn numbered_number(name: &str) -> Option<u32> {
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    if !is_numbered_slug(stem) {
+        return None;
+    }
+
+    let (prefix, _) = stem.split_once('-')?;
+    prefix.parse().ok()
+}
+
 /// Matches a numbered Markdown file, `NNNN-slug.md`.
 fn is_numbered_markdown(value: &str) -> bool {
     markdown_stem(value).is_some_and(is_numbered_slug)

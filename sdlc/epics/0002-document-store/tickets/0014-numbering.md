@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0008"]
 ---
 
@@ -36,13 +36,13 @@ two creates race.
 
 ## Acceptance criteria
 
-- [ ] Empty epic directory set → `0001`; empty ticket set → `0001`.
-- [ ] Existing epic `0001`, `0003` → `0004`.
-- [ ] Existing tickets `0001` and `0003` in different epics → `0004`.
-- [ ] Files and directories without a valid prefix are ignored.
-- [ ] Two concurrent creates get different numbers.
-- [ ] `9999` is the last valid number; the next attempt fails cleanly.
-- [ ] The number is zero-padded to four digits.
+- [x] Empty epic directory set → `0001`; empty ticket set → `0001`.
+- [x] Existing epic `0001`, `0003` → `0004`.
+- [x] Existing tickets `0001` and `0003` in different epics → `0004`.
+- [x] Files and directories without a valid prefix are ignored.
+- [x] Two concurrent creates get different numbers.
+- [x] `9999` is the last valid number; the next attempt fails cleanly.
+- [x] The number is zero-padded to four digits.
 
 ## Tests
 
