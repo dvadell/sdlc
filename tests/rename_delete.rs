@@ -85,6 +85,11 @@ async fn rename_an_epic_then_read_the_moved_ticket() {
         document.content,
         "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n"
     );
+
+    assert!(
+        !root.path().join("sdlc/epics/0001-foundation").exists(),
+        "the old epic directory must be gone after the rename"
+    );
 }
 
 #[tokio::test]

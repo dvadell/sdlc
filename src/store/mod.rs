@@ -60,12 +60,12 @@ pub enum StoreError {
 
     /// A rename would move a numbered document to another number; the number is
     /// part of the document identity and only the slug may change.
-    #[error("document number cannot change from {from} to {to}")]
+    #[error("document number cannot change from {from_name} to {to_name}")]
     NumberChange {
-        /// The number of the document being renamed.
-        from: String,
-        /// The number the destination would take.
-        to: String,
+        /// The source document being renamed, as a number-prefixed name.
+        from_name: String,
+        /// The destination document the rename would have produced.
+        to_name: String,
     },
 
     /// The epic directory still holds tickets, so it cannot be deleted yet.
@@ -498,12 +498,6 @@ impl DocStore {
     }
 }
 
-/// The four-digit document number a validated path names, or `None` for kinds
-/// without a number such as features and core documents.
-fn numbered_of(path: &DocPath) -> Option<u32> {
-    layout::document_name(path.as_path()).and_then(layout::numbered_number)
-}
-
 /// Renames an already-resolved source onto an already-resolved destination,
 /// touching the filesystem only after every check passed.
 ///
@@ -526,19 +520,18 @@ fn rename_resolved(
         )));
     }
 
-    let from_number = numbered_of(from);
-    let to_number = numbered_of(to);
+    let from_name = layout::document_name(from.as_path())
+        .unwrap_or_default()
+        .to_string();
+    let to_name = layout::document_name(to.as_path())
+        .unwrap_or_default()
+        .to_string();
+    let from_number = layout::numbered_number(&from_name);
+    let to_number = layout::numbered_number(&to_name);
     if let (Some(from_number), Some(to_number)) = (from_number, to_number)
         && from_number != to_number
     {
-        return Err(StoreError::NumberChange {
-            from: layout::document_name(from.as_path())
-                .unwrap_or_default()
-                .to_string(),
-            to: layout::document_name(to.as_path())
-                .unwrap_or_default()
-                .to_string(),
-        });
+        return Err(StoreError::NumberChange { from_name, to_name });
     }
 
     match from_kind {
@@ -668,8 +661,16 @@ fn orphaned_tickets(root: &Path, feature: &str) -> usize {
         };
         for ticket in tickets.filter_map(|ticket| ticket.ok()) {
             let ticket_file = ticket.file_name().to_string_lossy().into_owned();
-            let Ok(content) = std::fs::read_to_string(ticket.path()) else {
-                continue;
+            let content = match std::fs::read_to_string(ticket.path()) {
+                Ok(content) => content,
+                Err(err) => {
+                    tracing::warn!(
+                        file = %ticket.path().display(),
+                        error = %err,
+                        "skipping unreadable ticket during orphan scan"
+                    );
+                    continue;
+                }
             };
             let meta = crate::store::frontmatter::parse_ticket(&content, &ticket_file);
             let bound = meta
@@ -684,12 +685,12 @@ fn orphaned_tickets(root: &Path, feature: &str) -> usize {
     orphaned
 }
 
-///
-/// The expectation decides what the caller saw before writing: an `Existing`
-/// hash replaces the content only while the file on disk still hashes to it,
-/// and a `Missing` expectation creates the file while refusing to overwrite
-/// anything that is already there. The bytes land in a synced temp file that is
-/// renamed over the target, so a failure never leaves a partial document behind.
+/// Runs the atomic check-and-write sequence under the caller's write lock:
+/// an `Existing` hash replaces the content only while the file on disk still
+/// hashes to it, a `Missing` expectation creates the file while refusing to
+/// overwrite anything already present. The bytes land in a synced temp file
+/// that is renamed over the target, so a failure never leaves a partial
+/// document behind.
 fn save_critical(
     resolved: &Path,
     owned: &DocPath,

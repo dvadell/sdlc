@@ -87,8 +87,8 @@ pub fn epic_of(path: &Path) -> Option<&str> {
 pub fn document_name(path: &Path) -> Option<&str> {
     let segments = normal_segments(path)?;
     match segments.as_slice() {
-        ["sdlc", "epics", _epic, "description.md"] => Some(_epic),
-        ["sdlc", "epics", _epic, "tickets", ticket] => Some(ticket),
+        ["sdlc", "epics", epic, "description.md"] => Some(epic),
+        ["sdlc", "epics", _, "tickets", ticket] => Some(ticket),
         ["sdlc", "decisions", decision] => Some(decision),
         ["sdlc", "features", feature] => Some(feature),
         ["AGENTS.md"] => Some("AGENTS.md"),
