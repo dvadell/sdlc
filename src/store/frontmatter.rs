@@ -178,11 +178,13 @@ struct TicketFrontMatter {
     depends_on: Option<Vec<String>>,
 }
 
-/// Deserializes `Option<Vec<String>>` from a single quoted string or a list.
+/// Deserializes `Option<Vec<String>>` from a single quoted string, a single
+/// bare number, or a list of ids.
 ///
 /// Ticket dependencies are written quoted (`depends_on: ["0004"]`) but legacy
-/// hand-written metadata uses bare numbers (`depends_on: [4, 5]`), so both shapes
-/// are accepted and normalized to four-digit ids.
+/// hand-written metadata uses bare numbers (`depends_on: [4, 5]` or
+/// `depends_on: 7`), so all of those shapes are accepted and normalized to
+/// four-digit ids.
 fn depends_on<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -200,11 +202,14 @@ enum DependsOn {
 }
 
 /// One dependency id: a quoted string or a bare number.
+///
+/// The number is unsigned so a negative value such as `-3` is rejected instead of
+/// being formatted into an invalid id like `-003`.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum RawId {
     Text(String),
-    Integer(i64),
+    Integer(u32),
 }
 
 impl DependsOn {
@@ -561,6 +566,30 @@ mod tests {
             "sdlc/epics/0001-foundation/tickets/0005-add-import.md",
         );
         assert_eq!(legacy.depends_on, vec!["0004", "0005"]);
+    }
+
+    #[test]
+    fn bare_unquoted_single_dependency_id_is_normalized() {
+        let meta = parse_ticket(
+            "---\nstatus: todo\ndepends_on: 7\n---\n",
+            "sdlc/epics/0001-foundation/tickets/0007-add-export.md",
+        );
+
+        assert_eq!(meta.depends_on, vec!["0007"]);
+        assert_eq!(meta.status, Some(TicketStatus::Todo));
+    }
+
+    #[test]
+    fn negative_dependency_ids_are_rejected_as_malformed() {
+        let meta = parse_ticket(
+            "---\nstatus: todo\ndepends_on: [-3]\n---\n",
+            "sdlc/epics/0001-foundation/tickets/0004-add-export.md",
+        );
+
+        // A negative id is not a valid four-digit ticket id, so the whole
+        // block falls back to defaults instead of leaking a malformed id.
+        assert_eq!(meta.status, None);
+        assert!(meta.depends_on.is_empty());
     }
 
     #[test]
