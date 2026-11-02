@@ -58,6 +58,23 @@ pub enum StoreError {
     #[error("no document numbers remain; the next number would be {next}")]
     NumberExhausted { next: u32 },
 
+    /// A rename would move a numbered document to another number; the number is
+    /// part of the document identity and only the slug may change.
+    #[error("document number cannot change from {from} to {to}")]
+    NumberChange {
+        /// The number of the document being renamed.
+        from: String,
+        /// The number the destination would take.
+        to: String,
+    },
+
+    /// The epic directory still holds tickets, so it cannot be deleted yet.
+    #[error("epic has {tickets} tickets and cannot be deleted")]
+    EpicHasTickets {
+        /// The number of tickets that would move with the epic.
+        tickets: usize,
+    },
+
     /// A filesystem operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -107,6 +124,15 @@ impl Expectation {
             Expectation::Missing => ResolveMode::NewFile,
         }
     }
+}
+
+/// The report of a delete: how many tickets were left pointing at the deleted
+/// feature, and therefore orphaned instead of removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeleteReport {
+    /// The number of tickets whose feature binding named the deleted feature;
+    /// those tickets are not deleted or rewritten.
+    pub orphaned_tickets: usize,
 }
 
 /// The document store, rooted at one canonical project directory.
@@ -390,10 +416,274 @@ impl DocStore {
             Err(StoreError::NotFound(format!("no feature named {feature}")))
         }
     }
+
+    /// Renames a document, keeping its kind and number (ticket 0016).
+    ///
+    /// Both paths are resolved before anything is touched on disk: the source
+    /// must exist and the destination must resolve inside the root, so a symlink
+    /// that escapes the project is rejected before the rename runs. The
+    /// destination must not exist yet, so a collision fails with
+    /// [`StoreError::AlreadyExists`] instead of overwriting.
+    ///
+    /// Epics rename their whole directory, so their `tickets/` move with them
+    /// and no ticket front matter changes; the returned path is the new
+    /// `description.md`. Tickets move only within their current epic.
+    ///
+    /// The check and the rename run inside one write critical section.
+    pub async fn rename(&self, from: &DocPath, to: &DocPath) -> Result<DocPath, StoreError> {
+        let source = self.resolve(from, ResolveMode::Existing).await?;
+        let target = self.resolve_destination(to).await?;
+
+        let writes = self.writes.clone();
+        let owned_from = from.clone();
+        let owned_to = to.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
+            let _guard = writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            rename_resolved(&owned_from, &owned_to, &source, &target)
+        })
+        .await
+        .map_err(|err| StoreError::Io(io::Error::other(err)))?
+    }
+
+    /// Deletes a document, refusing core documents (ticket 0016).
+    ///
+    /// An epic is only deletable while its `tickets/` directory holds no `.md`
+    /// file; otherwise the delete fails with [`StoreError::EpicHasTickets`] and
+    /// nothing is removed. Deleting a feature orphans the tickets that point at
+    /// it, which the report counts without deleting or rewriting them.
+    ///
+    /// The removal runs inside one write critical section.
+    pub async fn delete(&self, path: &DocPath) -> Result<DeleteReport, StoreError> {
+        let resolved = self.resolve(path, ResolveMode::Existing).await?;
+
+        let writes = self.writes.clone();
+        let root = self.root.clone();
+        let owned = path.clone();
+
+        tokio::task::spawn_blocking(move || -> Result<DeleteReport, StoreError> {
+            let _guard = writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            delete_resolved(&root, &owned, &resolved)
+        })
+        .await
+        .map_err(|err| StoreError::Io(io::Error::other(err)))?
+    }
+
+    /// Resolves the destination of a rename that may not exist yet.
+    ///
+    /// File renames resolve with [`ResolveMode::NewFile`]; an epic rename
+    /// resolves to the new epic directory, because the destination of an epic
+    /// rename is a directory whose parent (the new epic directory) does not
+    /// exist yet.
+    async fn resolve_destination(&self, to: &DocPath) -> Result<PathBuf, StoreError> {
+        let kind = layout::kind(to.as_path()).ok_or_else(|| not_allowed(to.as_path()))?;
+        if let DocKind::Epic = kind {
+            let epic = layout::epic_of(to.as_path())
+                .ok_or_else(|| not_allowed(to.as_path()))?
+                .to_string();
+            let base = self.root.join("sdlc").join("epics");
+            let resolved_base = tokio::fs::canonicalize(&base)
+                .await
+                .map_err(|err| map_resolution_error(to, err))?;
+            let resolved_base = self.ensure_inside_root(to, resolved_base)?;
+
+            return Ok(resolved_base.join(epic));
+        }
+
+        self.resolve(to, ResolveMode::NewFile).await
+    }
 }
 
-/// The atomic check-and-write critical section, invoked with the store's write
-/// lock held.
+/// The four-digit document number a validated path names, or `None` for kinds
+/// without a number such as features and core documents.
+fn numbered_of(path: &DocPath) -> Option<u32> {
+    layout::document_name(path.as_path()).and_then(layout::numbered_number)
+}
+
+/// Renames an already-resolved source onto an already-resolved destination,
+/// touching the filesystem only after every check passed.
+///
+/// `source` and `target` are the resolved paths of the unit being renamed: the
+/// epic directory for an epic, the document file for feature, decision and
+/// ticket renames.
+fn rename_resolved(
+    from: &DocPath,
+    to: &DocPath,
+    source: &Path,
+    target: &Path,
+) -> Result<DocPath, StoreError> {
+    let from_kind = layout::kind(from.as_path()).ok_or_else(|| not_allowed(from.as_path()))?;
+    let to_kind = layout::kind(to.as_path()).ok_or_else(|| not_allowed(to.as_path()))?;
+    if from_kind != to_kind {
+        // A rename never crosses kinds; a core document is refused here as well,
+        // because renaming a core document is not an allowed operation.
+        return Err(StoreError::NotAllowed(format!(
+            "cannot rename a document of kind {from_kind:?} onto a document of kind {to_kind:?}"
+        )));
+    }
+
+    let from_number = numbered_of(from);
+    let to_number = numbered_of(to);
+    if let (Some(from_number), Some(to_number)) = (from_number, to_number)
+        && from_number != to_number
+    {
+        return Err(StoreError::NumberChange {
+            from: layout::document_name(from.as_path())
+                .unwrap_or_default()
+                .to_string(),
+            to: layout::document_name(to.as_path())
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+
+    match from_kind {
+        DocKind::Core(_) => Err(not_allowed(from.as_path())),
+        DocKind::Epic => {
+            // `source` is the epic directory here because the resolved source of
+            // an epic is its `description.md`, and the whole directory moves, so
+            // its `tickets/` travel with it.
+            let from_dir = source.parent().ok_or_else(|| not_allowed(source))?;
+            if path_exists(target)? {
+                return Err(StoreError::AlreadyExists(
+                    to.as_path().display().to_string(),
+                ));
+            }
+            std::fs::rename(from_dir, target)?;
+            Ok(to.clone())
+        }
+        DocKind::Ticket => {
+            // A ticket moves only within its current epic, so the epic
+            // directory has to be the same before anything is renamed.
+            let from_epic =
+                layout::epic_of(from.as_path()).ok_or_else(|| not_allowed(from.as_path()))?;
+            let to_epic = layout::epic_of(to.as_path()).ok_or_else(|| not_allowed(to.as_path()))?;
+            if from_epic != to_epic {
+                return Err(StoreError::NotAllowed(format!(
+                    "cannot rename a ticket onto another epic: {from_epic} -> {to_epic}"
+                )));
+            }
+            if path_exists(target)? {
+                return Err(StoreError::AlreadyExists(
+                    to.as_path().display().to_string(),
+                ));
+            }
+            std::fs::rename(source, target)?;
+            Ok(to.clone())
+        }
+        DocKind::Feature | DocKind::Decision => {
+            if path_exists(target)? {
+                return Err(StoreError::AlreadyExists(
+                    to.as_path().display().to_string(),
+                ));
+            }
+            std::fs::rename(source, target)?;
+            Ok(to.clone())
+        }
+    }
+}
+
+/// Deletes an already-resolved document, refusing core documents (ticket 0016).
+fn delete_resolved(
+    root: &Path,
+    path: &DocPath,
+    resolved: &Path,
+) -> Result<DeleteReport, StoreError> {
+    let kind = layout::kind(path.as_path()).ok_or_else(|| not_allowed(path.as_path()))?;
+
+    match kind {
+        DocKind::Core(_) => Err(not_allowed(path.as_path())),
+        DocKind::Epic => {
+            let epic_dir = resolved.parent().ok_or_else(|| not_allowed(resolved))?;
+            let tickets_dir = epic_dir.join("tickets");
+            let tickets = count_tickets(&tickets_dir);
+            if tickets > 0 {
+                return Err(StoreError::EpicHasTickets { tickets });
+            }
+            std::fs::remove_dir_all(epic_dir)?;
+            Ok(DeleteReport {
+                orphaned_tickets: 0,
+            })
+        }
+        DocKind::Feature => {
+            let feature = layout::document_name(path.as_path()).unwrap_or_default();
+            let orphaned = orphaned_tickets(root, feature);
+            std::fs::remove_file(resolved)?;
+            Ok(DeleteReport {
+                orphaned_tickets: orphaned,
+            })
+        }
+        DocKind::Decision | DocKind::Ticket => {
+            std::fs::remove_file(resolved)?;
+            Ok(DeleteReport {
+                orphaned_tickets: 0,
+            })
+        }
+    }
+}
+
+/// Counts the ticket files inside a tickets directory.
+fn count_tickets(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let file_name = entry.file_name();
+        if !file_name.to_string_lossy().ends_with(".md") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        count += 1;
+    }
+    count
+}
+
+/// Counts the tickets whose feature binding names a deleted feature.
+///
+/// The tickets themselves are left untouched: they become orphans, and the
+/// caller reports the count instead of rewriting them.
+fn orphaned_tickets(root: &Path, feature: &str) -> usize {
+    // The deleted feature name may carry the `.md` extension; ticket feature
+    // bindings may as well, so both are normalized to the bare slug.
+    let feature = feature.strip_suffix(".md").unwrap_or(feature);
+    let Ok(entries) = std::fs::read_dir(root.join("sdlc").join("epics")) else {
+        return 0;
+    };
+    let mut orphaned = 0;
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let tickets_dir = entry.path().join("tickets");
+        let Ok(tickets) = std::fs::read_dir(&tickets_dir) else {
+            continue;
+        };
+        for ticket in tickets.filter_map(|ticket| ticket.ok()) {
+            let ticket_file = ticket.file_name().to_string_lossy().into_owned();
+            let Ok(content) = std::fs::read_to_string(ticket.path()) else {
+                continue;
+            };
+            let meta = crate::store::frontmatter::parse_ticket(&content, &ticket_file);
+            let bound = meta
+                .feature
+                .as_deref()
+                .is_some_and(|bound| bound.strip_suffix(".md").unwrap_or(bound) == feature);
+            if bound {
+                orphaned += 1;
+            }
+        }
+    }
+    orphaned
+}
+
 ///
 /// The expectation decides what the caller saw before writing: an `Existing`
 /// hash replaces the content only while the file on disk still hashes to it,
@@ -1280,5 +1570,413 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
             .expect("read the feature back");
         assert_eq!(content, "---\nstatus: planned\n---\n\n# Export\n");
+    }
+
+    // ------------------------------------------------------------------
+    // Ticket 0016: rename and delete documents
+
+    #[tokio::test]
+    async fn rename_a_feature_keeps_the_content_and_returns_the_new_path() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+
+        let renamed = store
+            .rename(
+                &DocPath::parse("sdlc/features/export.md").expect("valid feature"),
+                &DocPath::parse("sdlc/features/csv-export.md").expect("valid feature"),
+            )
+            .await
+            .expect("the feature should be renamed");
+
+        assert_eq!(
+            renamed.as_path().display().to_string(),
+            "sdlc/features/csv-export.md"
+        );
+        assert!(!dir.path().join("sdlc/features/export.md").exists());
+        let document = store
+            .read(&renamed)
+            .await
+            .expect("read the renamed feature");
+        assert_eq!(document.content, "---\nstatus: planned\n---\n\n# Export\n");
+    }
+
+    #[tokio::test]
+    async fn rename_a_ticket_moves_it_within_its_epic_and_keeps_the_number() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("tickets dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic");
+        std::fs::write(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-project.md"),
+            "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n",
+        )
+        .expect("write the ticket");
+
+        let renamed = store
+            .rename(
+                &DocPath::parse("sdlc/epics/0001-foundation/tickets/0001-project.md")
+                    .expect("valid ticket"),
+                &DocPath::parse("sdlc/epics/0001-foundation/tickets/0001-project-skeleton.md")
+                    .expect("valid ticket"),
+            )
+            .await
+            .expect("the ticket should be renamed");
+
+        assert_eq!(
+            renamed.as_path().display().to_string(),
+            "sdlc/epics/0001-foundation/tickets/0001-project-skeleton.md"
+        );
+        assert!(
+            !dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-project.md")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_an_epic_moves_its_tickets_and_returns_the_new_description_path() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("tickets dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic");
+        std::fs::write(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-project.md"),
+            "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n",
+        )
+        .expect("write the ticket");
+
+        let renamed = store
+            .rename(
+                &DocPath::parse("sdlc/epics/0001-foundation/description.md").expect("valid epic"),
+                &DocPath::parse("sdlc/epics/0001-platform/description.md").expect("valid epic"),
+            )
+            .await
+            .expect("the epic should be renamed");
+
+        assert_eq!(
+            renamed.as_path().display().to_string(),
+            "sdlc/epics/0001-platform/description.md"
+        );
+        assert!(!dir.path().join("sdlc/epics/0001-foundation").exists());
+
+        let ticket = DocPath::parse("sdlc/epics/0001-platform/tickets/0001-project.md")
+            .expect("valid ticket");
+        let document = store.read(&ticket).await.expect("read the moved ticket");
+        assert_eq!(
+            document.content,
+            "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_a_changed_number() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation")).expect("epic dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic");
+
+        let error = store
+            .rename(
+                &DocPath::parse("sdlc/epics/0001-foundation/description.md").expect("valid epic"),
+                &DocPath::parse("sdlc/epics/0002-platform/description.md").expect("valid epic"),
+            )
+            .await
+            .expect_err("a rename must not change the document number");
+
+        assert!(
+            matches!(error, StoreError::NumberChange { .. }),
+            "got {error:?}"
+        );
+        assert!(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/description.md")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_cross_kind_renames() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::create_dir_all(dir.path().join("sdlc/decisions")).expect("decisions dir");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+
+        let error = store
+            .rename(
+                &DocPath::parse("sdlc/features/export.md").expect("valid feature"),
+                &DocPath::parse("sdlc/decisions/0001-use-axum.md").expect("valid decision"),
+            )
+            .await
+            .expect_err("a rename may not cross kinds");
+
+        assert!(matches!(error, StoreError::NotAllowed(_)), "got {error:?}");
+        assert!(dir.path().join("sdlc/features/export.md").exists());
+    }
+
+    #[tokio::test]
+    async fn rename_with_a_destination_collision_fails_without_overwriting() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+        std::fs::write(
+            dir.path().join("sdlc/features/csv-export.md"),
+            "---\nstatus: planned\n---\n\n# Csv export\n",
+        )
+        .expect("write the other feature");
+
+        let error = store
+            .rename(
+                &DocPath::parse("sdlc/features/export.md").expect("valid feature"),
+                &DocPath::parse("sdlc/features/csv-export.md").expect("valid feature"),
+            )
+            .await
+            .expect_err("a destination collision must fail");
+
+        assert!(
+            matches!(error, StoreError::AlreadyExists(_)),
+            "got {error:?}"
+        );
+        let content = std::fs::read_to_string(dir.path().join("sdlc/features/csv-export.md"))
+            .expect("read the feature back");
+        assert_eq!(content, "---\nstatus: planned\n---\n\n# Csv export\n");
+    }
+
+    #[tokio::test]
+    async fn rename_a_missing_document_returns_not_found() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .rename(
+                &DocPath::parse("sdlc/features/nope.md").expect("valid feature"),
+                &DocPath::parse("sdlc/features/other.md").expect("valid feature"),
+            )
+            .await
+            .expect_err("a rename of a missing document must fail");
+
+        assert!(matches!(error, StoreError::NotFound(_)), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn rename_a_core_document_is_not_allowed() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+
+        let error = store
+            .rename(
+                &DocPath::parse("sdlc/PRD.md").expect("valid core document"),
+                &DocPath::parse("sdlc/architecture.md").expect("valid core document"),
+            )
+            .await
+            .expect_err("a core document cannot be renamed");
+
+        assert!(matches!(error, StoreError::NotAllowed(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn rename_a_document_name_that_is_only_casing_different_is_rejected() {
+        // Valid document names are lowercase kebab-case, so a case-only rename
+        // such as `export.md` -> `Export.md` cannot name a valid destination. It
+        // is rejected while parsing, before the filesystem is touched; on a
+        // case-insensitive filesystem an `fs::rename` would instead perform a
+        // case-only rename, which no valid document name can express.
+        assert!(
+            matches!(
+                DocPath::parse("sdlc/features/Export.md"),
+                Err(StoreError::NotAllowed(_))
+            ),
+            "a case-variant document name must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_a_core_document_is_not_allowed() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+
+        let error = store
+            .delete(&DocPath::parse("sdlc/PRD.md").expect("valid core document"))
+            .await
+            .expect_err("a core document cannot be deleted");
+
+        assert!(matches!(error, StoreError::NotAllowed(_)), "got {error:?}");
+        assert!(dir.path().join("sdlc/PRD.md").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_a_missing_document_returns_not_found() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .delete(&DocPath::parse("sdlc/features/nope.md").expect("valid feature"))
+            .await
+            .expect_err("a delete of a missing document must fail");
+
+        assert!(matches!(error, StoreError::NotFound(_)), "got {error:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_each_core_document_is_not_allowed() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        for (raw, content) in [
+            ("sdlc/PRD.md", "# PRD\n"),
+            ("sdlc/architecture.md", "# Architecture\n"),
+            ("sdlc/conventions.md", "# Conventions\n"),
+            ("AGENTS.md", "# sdlc\n"),
+        ] {
+            std::fs::write(dir.path().join(raw), content).expect("write the core document");
+            let error = store
+                .delete(&DocPath::parse(raw).expect("valid core document"))
+                .await
+                .expect_err("a core document cannot be deleted");
+
+            assert!(matches!(error, StoreError::NotAllowed(_)), "got {error:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_a_non_empty_epic_returns_conflict_and_deletes_nothing() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("tickets dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic");
+        std::fs::write(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-project.md"),
+            "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n",
+        )
+        .expect("write the ticket");
+
+        let error = store
+            .delete(
+                &DocPath::parse("sdlc/epics/0001-foundation/description.md").expect("valid epic"),
+            )
+            .await
+            .expect_err("a non-empty epic must not be deletable");
+
+        assert!(
+            matches!(error, StoreError::EpicHasTickets { tickets: 1 }),
+            "got {error:?}"
+        );
+        assert!(dir.path().join("sdlc/epics/0001-foundation").exists());
+        assert!(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-project.md")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_an_empty_epic_removes_the_directory() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("tickets dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic");
+
+        let report = store
+            .delete(
+                &DocPath::parse("sdlc/epics/0001-foundation/description.md").expect("valid epic"),
+            )
+            .await
+            .expect("the empty epic should be deletable");
+
+        assert_eq!(report.orphaned_tickets, 0);
+        assert!(!dir.path().join("sdlc/epics/0001-foundation").exists());
+    }
+
+    #[tokio::test]
+    async fn delete_a_feature_reports_the_orphaned_tickets_without_deleting_them() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("tickets dir");
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(
+            dir.path().join("sdlc/epics/0001-foundation/description.md"),
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        )
+        .expect("write the epic");
+        std::fs::write(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-project.md"),
+            "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n",
+        )
+        .expect("write the ticket");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+
+        let report = store
+            .delete(&DocPath::parse("sdlc/features/export.md").expect("valid feature"))
+            .await
+            .expect("the feature should be deletable");
+
+        assert_eq!(report.orphaned_tickets, 1);
+        assert!(
+            !dir.path().join("sdlc/features/export.md").exists(),
+            "the feature itself should be deleted"
+        );
+        assert!(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/0001-project.md")
+                .exists(),
+            "the orphaned ticket must not be deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_a_decision_or_ticket_removes_the_file() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/decisions")).expect("decisions dir");
+        std::fs::write(
+            dir.path().join("sdlc/decisions/0001-use-axum.md"),
+            "---\nstatus: proposed\n---\n\n# 0001: Use axum\n",
+        )
+        .expect("write the decision");
+
+        let report = store
+            .delete(&DocPath::parse("sdlc/decisions/0001-use-axum.md").expect("valid decision"))
+            .await
+            .expect("the decision should be deletable");
+
+        assert_eq!(report.orphaned_tickets, 0);
+        assert!(!dir.path().join("sdlc/decisions/0001-use-axum.md").exists());
     }
 }

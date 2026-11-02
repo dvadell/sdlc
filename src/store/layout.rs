@@ -65,6 +65,40 @@ pub fn kind(path: &Path) -> Option<DocKind> {
     }
 }
 
+/// The epic directory of an epic or ticket document, such as
+/// `0001-foundation`, or `None` for documents that do not live under an epic.
+///
+/// Both an epic description and a ticket live under their epic directory, so
+/// the second path segment names it for both kinds.
+pub fn epic_of(path: &Path) -> Option<&str> {
+    let segments = normal_segments(path)?;
+    match segments.as_slice() {
+        ["sdlc", "epics", epic, ..] => Some(epic),
+        _ => None,
+    }
+}
+
+/// The kind-specific document name of a validated path: the epic directory for
+/// an epic, the ticket or decision file for a numbered document, the feature
+/// file for a feature, and the core file for a core document.
+///
+/// The name is the segment that carries the numeric prefix or the slug, so it is
+/// what [`numbered_number`] reads.
+pub fn document_name(path: &Path) -> Option<&str> {
+    let segments = normal_segments(path)?;
+    match segments.as_slice() {
+        ["sdlc", "epics", _epic, "description.md"] => Some(_epic),
+        ["sdlc", "epics", _epic, "tickets", ticket] => Some(ticket),
+        ["sdlc", "decisions", decision] => Some(decision),
+        ["sdlc", "features", feature] => Some(feature),
+        ["AGENTS.md"] => Some("AGENTS.md"),
+        ["sdlc", "PRD.md"] => Some("PRD.md"),
+        ["sdlc", "architecture.md"] => Some("architecture.md"),
+        ["sdlc", "conventions.md"] => Some("conventions.md"),
+        _ => None,
+    }
+}
+
 /// Splits `path` into UTF-8 normal components, rejecting everything else.
 ///
 /// Empty input yields `None`, so a bare `Path::new("")` is never valid.
@@ -226,5 +260,45 @@ mod tests {
         assert!(is_valid(Path::new("sdlc/decisions/0000-use-axum.md")));
         assert!(is_valid(Path::new("sdlc/decisions/9999-use-axum.md")));
         assert!(!is_valid(Path::new("sdlc/decisions/10000-use-axum.md")));
+    }
+
+    #[test]
+    fn names_the_epic_directory_of_an_epic_or_ticket() {
+        assert_eq!(
+            epic_of(Path::new("sdlc/epics/0001-foundation/description.md")),
+            Some("0001-foundation")
+        );
+        assert_eq!(
+            epic_of(Path::new(
+                "sdlc/epics/0001-foundation/tickets/0001-project.md"
+            )),
+            Some("0001-foundation")
+        );
+        assert_eq!(epic_of(Path::new("sdlc/features/export.md")), None);
+        assert_eq!(epic_of(Path::new("../AGENTS.md")), None);
+    }
+
+    #[test]
+    fn names_the_kind_specific_document_name() {
+        assert_eq!(
+            document_name(Path::new("sdlc/epics/0002-document-store/description.md")),
+            Some("0002-document-store")
+        );
+        assert_eq!(
+            document_name(Path::new(
+                "sdlc/epics/0002-document-store/tickets/0001-rename-delete.md"
+            )),
+            Some("0001-rename-delete.md")
+        );
+        assert_eq!(
+            document_name(Path::new("sdlc/decisions/0003-use-axum.md")),
+            Some("0003-use-axum.md")
+        );
+        assert_eq!(
+            document_name(Path::new("sdlc/features/export.md")),
+            Some("export.md")
+        );
+        assert_eq!(document_name(Path::new("sdlc/PRD.md")), Some("PRD.md"));
+        assert_eq!(document_name(Path::new("AGENTS.md")), Some("AGENTS.md"));
     }
 }

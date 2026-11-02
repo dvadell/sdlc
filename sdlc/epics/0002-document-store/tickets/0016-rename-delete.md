@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0015"]
 ---
 
@@ -40,21 +40,21 @@ protected from deletion.
 
 ## Acceptance criteria
 
-- [ ] Renaming a feature changes its file name and keeps content.
-- [ ] Renaming an epic changes its directory name and leaves its ticket paths
+- [x] Renaming a feature changes its file name and keeps content.
+- [x] Renaming an epic changes its directory name and leaves its ticket paths
   inside the new directory; the returned path is the new `description.md`.
-- [ ] Core documents cannot be renamed or deleted; both return `not_allowed`.
-- [ ] An epic/decision/ticket rename cannot change its number; changing it is
+- [x] Core documents cannot be renamed or deleted; both return `not_allowed`.
+- [x] An epic/decision/ticket rename cannot change its number; changing it is
   an error.
-- [ ] Cross-kind renames are rejected.
-- [ ] Destination collision is rejected without overwriting.
-- [ ] Deleting `PRD.md`, `architecture.md`, `conventions.md` or `AGENTS.md`
+- [x] Cross-kind renames are rejected.
+- [x] Destination collision is rejected without overwriting.
+- [x] Deleting `PRD.md`, `architecture.md`, `conventions.md` or `AGENTS.md`
   returns `not_allowed`.
-- [ ] Deleting a non-empty epic returns `conflict` and leaves the directory and
+- [x] Deleting a non-empty epic returns `conflict` and leaves the directory and
   all tickets untouched.
-- [ ] Deleting an empty epic removes the directory.
-- [ ] Deleting a feature reports how many tickets reference it.
-- [ ] Deleting a missing file returns `NotFound`.
+- [x] Deleting an empty epic removes the directory.
+- [x] Deleting a feature reports how many tickets reference it.
+- [x] Deleting a missing file returns `NotFound`.
 
 ## Tests
 
