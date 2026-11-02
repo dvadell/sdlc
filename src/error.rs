@@ -11,6 +11,8 @@ use std::io;
 use thiserror::Error;
 use tracing::error;
 
+use crate::store::StoreError;
+
 /// Errors from starting the loopback server.
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -104,6 +106,57 @@ impl ApiError {
     /// The JSON error envelope: exactly `error.code` and `error.message`.
     fn envelope(&self) -> serde_json::Value {
         json!({ "error": { "code": self.code, "message": self.message } })
+    }
+}
+
+impl From<StoreError> for ApiError {
+    fn from(err: StoreError) -> Self {
+        match err {
+            StoreError::NotAllowed(_) => Self::fixed(
+                StatusCode::BAD_REQUEST,
+                "not_allowed",
+                "path is not allowed",
+            ),
+            StoreError::NotFound(_) => {
+                Self::fixed(StatusCode::NOT_FOUND, "not_found", "document not found")
+            }
+            StoreError::AlreadyExists(_) => {
+                Self::fixed(StatusCode::CONFLICT, "conflict", "document already exists")
+            }
+            StoreError::Conflict { .. } => Self::conflict(),
+            StoreError::InvalidUtf8(cause) => {
+                tracing::warn!(error = %cause, "document is not valid UTF-8");
+                Self::fixed(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_utf8",
+                    "document is not valid UTF-8",
+                )
+            }
+            StoreError::InvalidTitle(_) => {
+                Self::fixed(StatusCode::BAD_REQUEST, "bad_request", "invalid title")
+            }
+            StoreError::NumberExhausted { .. } => Self::fixed(
+                StatusCode::CONFLICT,
+                "conflict",
+                "no document numbers remain",
+            ),
+            StoreError::NumberChange { .. } => Self::fixed(
+                StatusCode::BAD_REQUEST,
+                "not_allowed",
+                "number cannot change",
+            ),
+            StoreError::EpicHasTickets { .. } => {
+                Self::fixed(StatusCode::CONFLICT, "conflict", "epic still has tickets")
+            }
+            StoreError::Io(cause) => {
+                error!("store io error: {cause:?}");
+                Self::fixed(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "io",
+                    "internal server error",
+                )
+            }
+        }
     }
 }
 
@@ -238,5 +291,56 @@ mod tests {
             body,
             json!({ "error": { "code": "bad_request", "message": "quote \" and newline\n" } })
         );
+    }
+
+    #[test]
+    fn store_errors_map_to_stable_statuses_and_codes() {
+        let cases = [
+            (
+                StoreError::NotAllowed("/secret/path".to_string()),
+                StatusCode::BAD_REQUEST,
+                "not_allowed",
+            ),
+            (
+                StoreError::NotFound("sdlc/PRD.md".to_string()),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                StoreError::Conflict {
+                    current_hash: "abc".to_string(),
+                },
+                StatusCode::CONFLICT,
+                "conflict",
+            ),
+            (
+                StoreError::Io(io::Error::other("disk failed")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "io",
+            ),
+        ];
+
+        for (store_error, status, code) in cases {
+            let api_error = ApiError::from(store_error);
+
+            assert_eq!(api_error.status, status);
+            assert_eq!(api_error.code, code);
+        }
+    }
+
+    #[test]
+    fn store_errors_do_not_expose_absolute_paths_or_os_text() {
+        for store_error in [
+            StoreError::NotAllowed("/home/person/project/sdlc/PRD.md".to_string()),
+            StoreError::Io(io::Error::other(
+                "cannot open /home/person/project/sdlc/PRD.md",
+            )),
+        ] {
+            let body = serde_json::to_string(&ApiError::from(store_error).envelope())
+                .expect("error body should serialize");
+
+            assert!(!body.contains("/home/person"));
+            assert!(!body.contains("cannot open"));
+        }
     }
 }

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use crate::config::Config;
+use crate::store::DocStore;
 
 /// State cloned into every handler.
 ///
@@ -12,6 +13,8 @@ use crate::config::Config;
 pub struct AppState {
     /// Immutable startup configuration.
     pub config: Arc<Config>,
+    /// The document store rooted at the configured project directory.
+    pub store: Arc<DocStore>,
     /// Port the listener actually bound, which differs from `config.port()`
     /// when the configured port is `0`.
     pub bound_port: u16,
@@ -20,8 +23,15 @@ pub struct AppState {
 impl AppState {
     /// Creates the state for a server bound to `bound_port`.
     pub fn new(config: Config, bound_port: u16) -> Self {
+        // The project directory was validated and canonicalized when the
+        // configuration was built, so constructing the store cannot fail for a
+        // reason the caller could fix here.
+        let store = DocStore::new(config.project_dir().to_path_buf())
+            .expect("the configured project directory was canonicalized at startup");
+
         Self {
             config: Arc::new(config),
+            store: Arc::new(store),
             bound_port,
         }
     }
@@ -48,6 +58,7 @@ mod tests {
         let clone = state.clone();
 
         assert!(Arc::ptr_eq(&state.config, &clone.config));
+        assert!(Arc::ptr_eq(&state.store, &clone.store));
         assert_eq!(clone.bound_port, 4321);
     }
 }

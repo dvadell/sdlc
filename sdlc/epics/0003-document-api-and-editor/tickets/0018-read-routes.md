@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0007", "0010", "0013"]
 ---
 
@@ -29,12 +29,12 @@ Expose the read side of the store over HTTP in the shape the frontend needs.
 
 ## Acceptance criteria
 
-- [ ] Tree JSON matches the store shape exactly.
-- [ ] Document JSON contains exact content and the current hash.
-- [ ] Missing document → 404 JSON.
-- [ ] `..`, encoded traversal, absolute path and unknown layout → 400.
-- [ ] Unknown `/api/*` → JSON 404, not the SPA page.
-- [ ] `HEAD` is not accidentally treated as a save.
+- [x] Tree JSON matches the store shape exactly.
+- [x] Document JSON contains exact content and the current hash.
+- [x] Missing document → 404 JSON.
+- [x] `..`, encoded traversal, absolute path and unknown layout → 400.
+- [x] Unknown `/api/*` → JSON 404, not the SPA page.
+- [x] `HEAD` is not accidentally treated as a save.
 
 ## Tests
 
