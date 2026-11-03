@@ -121,7 +121,8 @@ export async function createDoc(kind, title, epic, feature) {
 export async function moveDoc(from, to) {
   // Validate only; the raw paths are sent in the JSON body (URL-encoding is for
   // the path route, where the server re-validates via `DocPath::parse`). The
-  // return value is the encoded path and is intentionally discarded here.
+  // response carries the validated destination path, which the caller uses to
+  // follow a rename.
   void validateDocPath(from);
   void validateDocPath(to);
   return request("POST", "/api/docs/move", { from, to });

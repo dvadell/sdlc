@@ -259,6 +259,18 @@ export async function save() {
   }
 }
 
+// Clears the editor after the selected document was deleted, so no stale content,
+// hash or dirty state survives a mutation (ticket 0025).
+export function clearEditor() {
+  state.current.path = null;
+  state.current.content = "";
+  state.current.savedContent = "";
+  state.current.hash = null;
+  state.dirty = false;
+  renderEditor();
+  renderDirtyIndicator();
+}
+
 // Warns before the tab closes with unsaved changes.
 window.addEventListener("beforeunload", (event) => {
   if (!state.dirty) {

@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0020", "0022", "0023"]
 ---
 
@@ -35,15 +35,15 @@ without a terminal, with confirmation before deletion.
 
 ## Acceptance criteria
 
-- [ ] Creating each kind adds it to the tree and opens it.
-- [ ] Epic creation asks only for a title and starts as `planned`.
-- [ ] Ticket creation asks for an epic and optionally a feature.
-- [ ] Duplicate name shows the server message; no second file is created.
-- [ ] Rename keeps content and selection follows the new path.
-- [ ] Delete asks for confirmation; cancel leaves everything.
-- [ ] Deleting the open document clears the editor.
-- [ ] Core files expose edit but not rename/delete.
-- [ ] Empty or whitespace-only titles never reach the server.
+- [x] Creating each kind adds it to the tree and opens it.
+- [x] Epic creation asks only for a title and starts as `planned`.
+- [x] Ticket creation asks for an epic and optionally a feature.
+- [x] Duplicate name shows the server message; no second file is created.
+- [x] Rename keeps content and selection follows the new path.
+- [x] Delete asks for confirmation; cancel leaves everything.
+- [x] Deleting the open document clears the editor.
+- [x] Core files expose edit but not rename/delete.
+- [x] Empty or whitespace-only titles never reach the server.
 
 ## Tests
 

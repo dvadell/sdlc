@@ -1,7 +1,9 @@
 // The document tree panel of the sidebar (ticket 0022).
 
 import { state } from "./state.js";
-import { getTree } from "./api.js";
+import { createDoc, deleteDoc, getTree, moveDoc } from "./api.js";
+import { showError } from "./errors.js";
+import { clearEditor } from "./editor.js";
 
 // The groups of the document tree in the order the sidebar renders them. Tickets
 // will be grouped under their epic from ticket 0053 on; the flat per-group entry
@@ -17,6 +19,25 @@ const GROUP_LABELS = {
 };
 
 const PLACEHOLDER = "The document tree will appear here once the project has a layout.";
+
+// The document kinds the sidebar can create, one creation affordance per group.
+// The ticket 0052 replaces the free-text epic and feature selectors of the v1
+// prompts with proper pickers.
+const CREATABLE_GROUPS = {
+  epic: { kind: "epic", label: "epic" },
+  feature: { kind: "feature", label: "feature" },
+  decision: { kind: "decision", label: "decision" },
+  ticket: { kind: "ticket", label: "ticket" },
+};
+
+// One mutation runs at a time; its buttons are disabled while the request is in
+// flight and re-enabled afterwards.
+function setActionsDisabled(disabled) {
+  const buttons = document.querySelectorAll("#sidebar .new-doc, #sidebar .doc-action");
+  for (const button of buttons) {
+    button.disabled = disabled;
+  }
+}
 
 // The editor loads the selected document through this hook. The editor module
 // owns it from ticket 0023 on, so the sidebar keeps a stub until then.
@@ -40,6 +61,176 @@ function loadDocument(path) {
     console.error("Loading document failed:", error);
     return Promise.reject(error);
   }
+}
+
+// The slug of a document title, mirroring the server's slugify: lowercase ASCII
+// words joined by single hyphens, punctuation dropped and no empty words.
+function slugifyTitle(title) {
+  const slug = String(title)
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.replace(/[^a-z0-9]/g, ""))
+    .filter((word) => word.length > 0)
+    .join("-");
+  return slug;
+}
+
+// The destination of a rename, derived from the new title while keeping the
+// document number of numbered kinds and the epic of a ticket.
+function renameDestination(entry, newTitle) {
+  const slug = slugifyTitle(newTitle);
+  const segments = entry.path.split("/");
+  if (entry.kind === "epic") {
+    const epic = segments[2] ?? "";
+    const number = epic.split("-")[0] ?? "";
+    return `sdlc/epics/${number}-${slug}/description.md`;
+  }
+  if (entry.kind === "ticket") {
+    const epic = segments[2] ?? "";
+    const ticket = segments[4] ?? "";
+    const number = ticket.replace(/\.md$/, "").split("-")[0] ?? "";
+    return `sdlc/epics/${epic}/tickets/${number}-${slug}.md`;
+  }
+  if (entry.kind === "decision") {
+    const decision = segments[2] ?? "";
+    const number = decision.replace(/\.md$/, "").split("-")[0] ?? "";
+    return `sdlc/decisions/${number}-${slug}.md`;
+  }
+  return `sdlc/features/${slug}.md`;
+}
+
+// How many tickets still name the given feature, for the delete confirmation.
+function orphanedTicketCount(feature) {
+  const docs = state.tree?.docs ?? [];
+  return docs.filter((doc) => doc?.kind === "ticket" && doc?.feature === feature).length;
+}
+
+// The confirmation text of a delete, including the path and the ticket count
+// of an epic or feature that would be affected.
+function deleteMessage(entry) {
+  const path = entry.path;
+  const message = `Delete ${entry.kind} "${entry.title}" at ${path}? This cannot be undone.`;
+  if (entry.kind === "epic") {
+    const epic = path.split("/")[2] ?? "";
+    const count = ticketCount(state.tree?.docs ?? [], epic);
+    if (count > 0) {
+      message += ` ${count} ${count === 1 ? "ticket is" : "tickets are"} still assigned; delete or move them first.`;
+    }
+  }
+  if (entry.kind === "feature") {
+    const feature = (path.split("/")[2] ?? "").replace(/\.md$/, "");
+    const orphaned = orphanedTicketCount(feature);
+    if (orphaned > 0) {
+      message += ` ${orphaned} ${orphaned === 1 ? "ticket still references it" : "tickets still reference it"}.`;
+    }
+  }
+  return message;
+}
+
+// After a mutation: refresh the tree, select the created or renamed document and
+// reload it, so the editor always follows the path the server answered with.
+async function selectAfterMutation(path) {
+  state.current.path = path;
+  await refreshTree();
+  await loadDocument(path);
+}
+
+// Creates a document of one group through the prompt flow of the v1 actions.
+async function createFromGroup(group) {
+  const kind = CREATABLE_GROUPS[group].kind;
+  const title = window.prompt(`New ${kind} title:`);
+  if (title === null) {
+    return;
+  }
+  const trimmedTitle = String(title).trim();
+  if (trimmedTitle.length === 0) {
+    // window.prompt cannot validate inline; an empty title never reaches the server.
+    return;
+  }
+
+  let epic;
+  let feature;
+  if (kind === "ticket") {
+    const epicPrompt = window.prompt("Epic directory (for example 0001-foundation):", epicDefault());
+    if (epicPrompt === null) {
+      return;
+    }
+    epic = String(epicPrompt).trim();
+    if (epic.length === 0) {
+      showError(new Error("A ticket needs an epic directory."));
+      return;
+    }
+    const featurePrompt = window.prompt("Feature slug (optional):", "");
+    if (featurePrompt === null) {
+      return;
+    }
+    feature = String(featurePrompt).trim() || undefined;
+  }
+
+  setActionsDisabled(true);
+  try {
+    const created = await createDoc(kind, trimmedTitle, epic, feature);
+    await selectAfterMutation(created.path);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setActionsDisabled(false);
+  }
+}
+
+// Renames a document through the prompt flow, keeping the content and following
+// the returned path after the move.
+async function renameFromEntry(entry) {
+  const newTitle = window.prompt(`Rename ${entry.kind} "${entry.title}" to:`, entry.title);
+  if (newTitle === null) {
+    return;
+  }
+  const title = String(newTitle).trim();
+  if (title.length === 0) {
+    // An empty title is refused by the server; never send it.
+    return;
+  }
+  const to = renameDestination(entry, title);
+
+  setActionsDisabled(true);
+  try {
+    const moved = await moveDoc(entry.path, to);
+    await selectAfterMutation(moved.path);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setActionsDisabled(false);
+  }
+}
+
+// Deletes a document after the person confirmed, clearing the editor when the
+// open document was the deleted one.
+async function deleteFromEntry(entry) {
+  if (!window.confirm(deleteMessage(entry))) {
+    return;
+  }
+
+  setActionsDisabled(true);
+  try {
+    await deleteDoc(entry.path);
+    if (state.current?.path === entry.path) {
+      // The open document is gone, so no stale content, hash or dirty state may
+      // survive the deletion (ticket 0025).
+      clearEditor();
+    }
+    await refreshTree();
+  } catch (error) {
+    showError(error);
+  } finally {
+    setActionsDisabled(false);
+  }
+}
+
+// The epic directory offered as the default target of a ticket creation.
+function epicDefault() {
+  const epics = (state.tree?.docs ?? []).filter((doc) => doc?.kind === "epic");
+  return epics.length > 0 ? epics[0].path.split("/")[2] ?? "" : "";
 }
 
 function createCurrent() {
@@ -205,17 +396,48 @@ export function renderSidebar() {
 
   bindClickDelegation();
 
+  const groups = new Map();
   for (const [group, entries] of groupEntries(tree.docs)) {
+    groups.set(group, entries);
+  }
+
+  for (const group of GROUP_ORDER) {
+    const entries = groups.get(group);
+    const creatable = CREATABLE_GROUPS[group] ?? null;
+    const hasEntries = entries !== undefined && entries.length > 0;
+    // Empty groups are hidden, except the creatable ones, whose purpose is the
+    // creation of the very first document of that kind.
+    if (!hasEntries && !creatable) {
+      continue;
+    }
+
     const heading = document.createElement("h2");
     heading.textContent = GROUP_LABELS[group] ?? group;
     element.appendChild(heading);
 
+    if (creatable) {
+      element.appendChild(createNewButton(group));
+    }
+
     const list = document.createElement("ul");
-    for (const entry of entries) {
+    for (const entry of entries ?? []) {
       list.appendChild(createRow(group, entry, tree.docs));
     }
     element.appendChild(list);
   }
+}
+
+// The per-group creation button; it prompts for the title and delegates to the
+// create action of the group (ticket 0025).
+function createNewButton(group) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "new-doc";
+  button.textContent = `New ${CREATABLE_GROUPS[group].label}`;
+  button.addEventListener("click", () => {
+    void createFromGroup(group);
+  });
+  return button;
 }
 
 function createRow(group, entry, docs) {
@@ -263,7 +485,37 @@ function createRow(group, entry, docs) {
   row.title = entry.path;
 
   item.appendChild(row);
+  if (group !== "core") {
+    item.appendChild(createRowActions(entry));
+  }
   return item;
+}
+
+// The rename and delete actions of one document row; core documents expose no
+// mutation actions and only the editor can change them.
+function createRowActions(entry) {
+  const actions = document.createElement("div");
+  actions.className = "doc-actions";
+
+  const rename = document.createElement("button");
+  rename.type = "button";
+  rename.className = "doc-action";
+  rename.textContent = "Rename";
+  rename.addEventListener("click", () => {
+    void renameFromEntry(entry);
+  });
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "doc-action";
+  remove.textContent = "Delete";
+  remove.addEventListener("click", () => {
+    void deleteFromEntry(entry);
+  });
+
+  actions.appendChild(rename);
+  actions.appendChild(remove);
+  return actions;
 }
 
 function treeContains(tree, path) {
