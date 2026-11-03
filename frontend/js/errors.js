@@ -11,6 +11,9 @@ const banner = document.querySelector("#error-banner");
 const app = document.querySelector("#app");
 
 export function showError(error) {
+  if (!banner || !app) {
+    return;
+  }
   const detail = error instanceof Error ? error.message : String(error);
   const code = error && error.code ? ` (${error.code})` : "";
   banner.textContent = `The request failed${code}: ${detail}`;
@@ -21,6 +24,9 @@ export function showError(error) {
 }
 
 export function renderDismiss() {
+  if (!banner || !app) {
+    return;
+  }
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.textContent = "Dismiss";
@@ -29,6 +35,9 @@ export function renderDismiss() {
 }
 
 export function hideError() {
+  if (!banner || !app) {
+    return;
+  }
   banner.hidden = true;
   app.style.paddingTop = "";
   app.classList.remove("error-banner-open");

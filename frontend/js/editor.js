@@ -100,7 +100,7 @@ export async function loadDocument(path) {
 
   const document = await getDoc(path);
   state.current.path = path;
-  state.current.content = document.content;
+  state.current.content = normalizeNewlines(document.content);
   state.current.savedContent = document.content;
   state.current.hash = document.hash;
   state.dirty = false;
@@ -122,11 +122,14 @@ function setSaveButtonDisabled(disabled) {
 // the server response, never from an optimistic update.
 export async function save() {
   if (saveInFlight || !isDirty()) {
-    return;
+    return Promise.resolve();
   }
 
   saveInFlight = true;
-  setSaveButtonDisabled(true);
+  const thisSaveButton = saveButton;
+  if (thisSaveButton) {
+    thisSaveButton.disabled = true;
+  }
   try {
     const path = state.current.path;
     const content = toSavedContent(textarea.value);
@@ -147,7 +150,9 @@ export async function save() {
     throw error;
   } finally {
     saveInFlight = false;
-    setSaveButtonDisabled(false);
+    if (thisSaveButton) {
+      thisSaveButton.disabled = false;
+    }
   }
 }
 
