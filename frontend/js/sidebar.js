@@ -94,6 +94,7 @@ function onClick(event) {
   const previousContent = current.content;
   const previousSavedContent = current.savedContent;
   const previousHash = current.hash;
+  const previousDirty = state.dirty;
   current.path = entry.path;
   const rows = element.querySelectorAll(".doc-row");
   for (const candidate of rows) {
@@ -107,6 +108,7 @@ function onClick(event) {
       latest.content = previousContent;
       latest.savedContent = previousSavedContent;
       latest.hash = previousHash;
+      latest.dirty = previousDirty;
     }
     row.classList.remove("selected");
     const freshRows = element.querySelectorAll(".doc-row");

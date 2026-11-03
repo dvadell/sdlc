@@ -111,12 +111,6 @@ export async function loadDocument(path) {
   renderDirtyIndicator();
 }
 
-function setSaveButtonDisabled(disabled) {
-  if (saveButton) {
-    saveButton.disabled = disabled;
-  }
-}
-
 // Saves the textarea content of the selected document. No-op when the document
 // is clean or a save is already in flight; the stored hash is only trusted from
 // the server response, never from an optimistic update.
@@ -141,8 +135,8 @@ export async function save() {
     }
     state.current.hash = response.hash;
     state.current.savedContent = content;
-    state.current.content = content;
-    state.dirty = false;
+    state.current.content = textarea.value;
+    state.dirty = isDirty();
     renderDirtyIndicator();
   } catch (error) {
     // Keep the text and the dirty state; the banner shows the error.
