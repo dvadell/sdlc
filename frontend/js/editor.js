@@ -19,8 +19,6 @@ let saveInFlight = false;
 // Whether the rendered preview is shown instead of the source textarea
 // (ticket 0024).
 let previewVisible = false;
-// Debounce timer for preview re-renders while the preview is visible.
-let previewTimer = null;
 // The caret of the textarea when it was hidden behind the preview; restored on
 // switching back to source.
 let previewCaret = null;
@@ -74,9 +72,8 @@ export function renderEditor() {
   }
 
   element.replaceChildren();
-  clearTimeout(previewTimer);
-  previewTimer = null;
   previewVisible = false;
+  previewCaret = null;
 
   const toolbar = document.createElement("div");
   toolbar.className = "editor-toolbar";
@@ -105,7 +102,6 @@ export function renderEditor() {
     state.current.content = textarea.value;
     state.dirty = isDirty();
     renderDirtyIndicator();
-    schedulePreview();
   });
 
   element.appendChild(toolbar);
@@ -122,26 +118,21 @@ function renderPreview() {
   if (!previewElement) {
     return;
   }
-  const html = DOMPurify.sanitize(marked.parse(state.current.content));
+  const markdown = textarea?.value ?? state.current.content ?? "";
+  let html;
+  try {
+    html = DOMPurify.sanitize(marked.parse(String(markdown)));
+  } catch (error) {
+    previewElement.textContent = "Preview could not be rendered.";
+    return;
+  }
   previewElement.innerHTML = html;
   // DOMPurify drops `target` in some configurations; force the new-tab behaviour
   // after sanitizing, not before.
   previewElement.querySelectorAll("a").forEach((link) => {
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
+    link.setAttribute("target", "_blank");
+    link.setAttribute("rel", "noopener noreferrer");
   });
-}
-
-// Renders the preview after a 150 ms debounce once the person stopped typing
-// while the preview was already visible.
-function schedulePreview() {
-  if (!previewVisible) {
-    return;
-  }
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(() => {
-    renderPreview();
-  }, 150);
 }
 
 function updatePreviewButton() {
@@ -153,19 +144,24 @@ function updatePreviewButton() {
 }
 
 // Switches the editor area between the source textarea and the rendered
-// preview (ticket 0024). Renders on toggle and, while the preview is visible,
-// again on a 150 ms debounce after input; switching back to source restores the
-// textarea and the caret and leaves the dirty state untouched.
+// preview (ticket 0024). Renders on toggle; switching back to source restores
+// the textarea and the caret and leaves the dirty state untouched.
 export function togglePreview() {
   const element = document.querySelector("#editor");
   if (!element) {
     return;
   }
 
+  if (
+    typeof globalThis.marked?.parse !== "function" ||
+    typeof globalThis.DOMPurify?.sanitize !== "function"
+  ) {
+    showError(new Error("Preview libraries failed to load."));
+    return;
+  }
+
   if (previewVisible) {
     previewVisible = false;
-    clearTimeout(previewTimer);
-    previewTimer = null;
     const previewElement = document.querySelector("#preview");
     if (previewElement) {
       previewElement.hidden = true;
@@ -182,8 +178,6 @@ export function togglePreview() {
   }
 
   previewVisible = true;
-  clearTimeout(previewTimer);
-  previewTimer = null;
   if (textarea) {
     previewCaret = { start: textarea.selectionStart, end: textarea.selectionEnd };
     textarea.hidden = true;
@@ -238,7 +232,7 @@ export async function save() {
   }
   const path = state.current.path;
   try {
-    const content = toSavedContent(textarea.value);
+    const content = toSavedContent(textarea ? textarea.value : (state.current.content ?? ""));
     const response = await saveDoc(path, content, state.current.hash);
     if (state.current.path !== path) {
       // The person switched documents while the save was in flight; the response

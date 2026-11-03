@@ -258,6 +258,8 @@ body {
 
 #preview p {
   margin: 0.55rem 0;
+  padding: 0;
+  color: inherit;
 }
 
 #preview ul,
