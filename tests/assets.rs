@@ -132,6 +132,30 @@ async fn style_css_returns_the_styles() {
 }
 
 #[tokio::test]
+async fn vendored_preview_library_is_served() {
+    let config = asset_config(0);
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("the listener should bind");
+    let addr = listener.local_addr().expect("the listener address");
+    let server = tokio::spawn(serve(config, listener));
+
+    let (marked_status, marked_type, marked_body) = get(addr, "/vendor/marked.min.js").await;
+
+    assert_eq!(marked_status, 200);
+    assert_eq!(marked_type, "text/javascript");
+    assert!(marked_body.contains("marked v12.0.0"));
+
+    let (purify_status, purify_type, purify_body) = get(addr, "/vendor/purify.min.js").await;
+
+    assert_eq!(purify_status, 200);
+    assert_eq!(purify_type, "text/javascript");
+    assert!(purify_body.contains("DOMPurify 3.4.17"));
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn unknown_path_falls_back_to_the_entry_page() {
     let config = asset_config(0);
     let listener = TcpListener::bind(("127.0.0.1", 0))

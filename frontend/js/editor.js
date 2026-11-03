@@ -1,4 +1,5 @@
-//! The document editor: textarea, dirty state and save (ticket 0023).
+//! The document editor: textarea, dirty state, save and preview (tickets 0023
+//! and 0024).
 
 import { state } from "./state.js";
 import { getDoc, saveDoc } from "./api.js";
@@ -8,10 +9,21 @@ import { showError } from "./errors.js";
 let textarea = null;
 // The save button of the toolbar; null until a document is loaded.
 let saveButton = null;
+// The preview toggle button of the toolbar; null until a document is loaded.
+let previewButton = null;
 
 // The save button is disabled while a save is in flight; `save` ignores a second
 // submit on top of that.
 let saveInFlight = false;
+
+// Whether the rendered preview is shown instead of the source textarea
+// (ticket 0024).
+let previewVisible = false;
+// Debounce timer for preview re-renders while the preview is visible.
+let previewTimer = null;
+// The caret of the textarea when it was hidden behind the preview; restored on
+// switching back to source.
+let previewCaret = null;
 
 // The textarea normalizes line endings to `\n`; a document that was stored with
 // CRLF has to be converted back before it reaches the server, or every save
@@ -62,6 +74,9 @@ export function renderEditor() {
   }
 
   element.replaceChildren();
+  clearTimeout(previewTimer);
+  previewTimer = null;
+  previewVisible = false;
 
   const toolbar = document.createElement("div");
   toolbar.className = "editor-toolbar";
@@ -74,6 +89,15 @@ export function renderEditor() {
   });
   toolbar.appendChild(saveButton);
 
+  previewButton = document.createElement("button");
+  previewButton.type = "button";
+  previewButton.id = "toggle-preview";
+  previewButton.textContent = "Preview";
+  previewButton.addEventListener("click", () => {
+    togglePreview();
+  });
+  toolbar.appendChild(previewButton);
+
   textarea = document.createElement("textarea");
   textarea.id = "document-content";
   textarea.className = "document-content";
@@ -81,10 +105,98 @@ export function renderEditor() {
     state.current.content = textarea.value;
     state.dirty = isDirty();
     renderDirtyIndicator();
+    schedulePreview();
   });
 
   element.appendChild(toolbar);
   element.appendChild(textarea);
+}
+
+// Renders the markdown of the selected document into the preview element: the
+// marked parser turns it into HTML, DOMPurify sanitizes it, and the sanitized
+// markup is what gets inserted. The sanitized string is the only thing ever
+// inserted, so raw HTML in the document is escaped or stripped instead of being
+// executed; `marked` does not sanitize, so the order matters.
+function renderPreview() {
+  const previewElement = document.querySelector("#preview");
+  if (!previewElement) {
+    return;
+  }
+  const html = DOMPurify.sanitize(marked.parse(state.current.content));
+  previewElement.innerHTML = html;
+  // DOMPurify drops `target` in some configurations; force the new-tab behaviour
+  // after sanitizing, not before.
+  previewElement.querySelectorAll("a").forEach((link) => {
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+  });
+}
+
+// Renders the preview after a 150 ms debounce once the person stopped typing
+// while the preview was already visible.
+function schedulePreview() {
+  if (!previewVisible) {
+    return;
+  }
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => {
+    renderPreview();
+  }, 150);
+}
+
+function updatePreviewButton() {
+  if (!previewButton) {
+    return;
+  }
+  previewButton.textContent = previewVisible ? "Close preview" : "Preview";
+  previewButton.setAttribute("aria-pressed", previewVisible ? "true" : "false");
+}
+
+// Switches the editor area between the source textarea and the rendered
+// preview (ticket 0024). Renders on toggle and, while the preview is visible,
+// again on a 150 ms debounce after input; switching back to source restores the
+// textarea and the caret and leaves the dirty state untouched.
+export function togglePreview() {
+  const element = document.querySelector("#editor");
+  if (!element) {
+    return;
+  }
+
+  if (previewVisible) {
+    previewVisible = false;
+    clearTimeout(previewTimer);
+    previewTimer = null;
+    const previewElement = document.querySelector("#preview");
+    if (previewElement) {
+      previewElement.hidden = true;
+    }
+    if (textarea) {
+      textarea.hidden = false;
+      const start = previewCaret?.start ?? textarea.selectionStart;
+      const end = previewCaret?.end ?? textarea.selectionEnd;
+      textarea.focus();
+      textarea.setSelectionRange(start, end);
+    }
+    updatePreviewButton();
+    return;
+  }
+
+  previewVisible = true;
+  clearTimeout(previewTimer);
+  previewTimer = null;
+  if (textarea) {
+    previewCaret = { start: textarea.selectionStart, end: textarea.selectionEnd };
+    textarea.hidden = true;
+  }
+  let previewElement = document.querySelector("#preview");
+  if (!previewElement) {
+    previewElement = document.createElement("div");
+    previewElement.id = "preview";
+    element.appendChild(previewElement);
+  }
+  previewElement.hidden = false;
+  renderPreview();
+  updatePreviewButton();
 }
 
 // Loads a document into the editor, asking before discarding unsaved changes.

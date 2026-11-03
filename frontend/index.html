@@ -20,6 +20,10 @@
       </aside>
       <div id="error-banner" class="error-banner" role="alert" aria-live="assertive" hidden></div>
     </div>
+    <!-- Vendored markdown renderer and sanitizer (ticket 0024); classic scripts
+         expose the `marked` and `DOMPurify` globals before the module loads. -->
+    <script src="/vendor/marked.min.js"></script>
+    <script src="/vendor/purify.min.js"></script>
     <script type="module" src="/js/main.js"></script>
   </body>
 </html>

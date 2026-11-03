@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0021"]
 ---
 
@@ -35,13 +35,13 @@ and no CDN dependency.
 
 ## Acceptance criteria
 
-- [ ] Toggle shows rendered headings, lists, links, tables and fenced code.
-- [ ] `<script>`, `<img onerror>`, `<iframe>` and `javascript:` links are
+- [x] Toggle shows rendered headings, lists, links, tables and fenced code.
+- [x] `<script>`, `<img onerror>`, `<iframe>` and `javascript:` links are
   removed or neutralized.
-- [ ] Raw HTML in documents is escaped or sanitized, never executed.
-- [ ] Toggle back to source preserves text and does not mark the document dirty.
-- [ ] Preview updates while typing when already visible.
-- [ ] Works offline; no requests leave the origin for the libraries.
+- [x] Raw HTML in documents is escaped or sanitized, never executed.
+- [x] Toggle back to source preserves text and does not mark the document dirty.
+- [x] Preview updates while typing when already visible.
+- [x] Works offline; no requests leave the origin for the libraries.
 
 ## Tests
 
