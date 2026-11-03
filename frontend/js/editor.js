@@ -124,8 +124,8 @@ export async function save() {
   if (thisSaveButton) {
     thisSaveButton.disabled = true;
   }
+  const path = state.current.path;
   try {
-    const path = state.current.path;
     const content = toSavedContent(textarea.value);
     const response = await saveDoc(path, content, state.current.hash);
     if (state.current.path !== path) {
