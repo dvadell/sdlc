@@ -108,7 +108,7 @@ function onClick(event) {
       latest.content = previousContent;
       latest.savedContent = previousSavedContent;
       latest.hash = previousHash;
-      latest.dirty = previousDirty;
+      state.dirty = previousDirty;
     }
     row.classList.remove("selected");
     const freshRows = element.querySelectorAll(".doc-row");

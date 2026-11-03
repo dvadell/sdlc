@@ -139,8 +139,11 @@ export async function save() {
     state.dirty = isDirty();
     renderDirtyIndicator();
   } catch (error) {
-    // Keep the text and the dirty state; the banner shows the error.
-    state.dirty = true;
+    // Keep the text and the dirty state; the banner shows the error. Only mark
+    // the current document dirty when this save still belonged to it.
+    if (state.current.path === path) {
+      state.dirty = true;
+    }
     throw error;
   } finally {
     saveInFlight = false;
