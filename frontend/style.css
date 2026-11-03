@@ -70,6 +70,88 @@ body {
   font-size: 0.9rem;
 }
 
+#sidebar h2 {
+  margin: 0.9rem 0 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #555555;
+}
+
+#sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#sidebar .doc-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  padding: 0.3rem 0.4rem;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#sidebar .doc-row:hover,
+#sidebar .doc-row:focus-visible {
+  background: #f2f2f2;
+}
+
+#sidebar .doc-row:focus-visible {
+  outline: 2px solid #8bb0e8;
+  outline-offset: 2px;
+}
+
+#sidebar .doc-row.selected {
+  background: #dbe7f8;
+}
+
+#sidebar .doc-number {
+  flex: 0 0 auto;
+  min-width: 2ch;
+  font-size: 0.8rem;
+  color: #555555;
+}
+
+#sidebar .doc-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#sidebar .doc-badge,
+#sidebar .doc-count {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#sidebar .doc-badge {
+  padding: 0.05rem 0.35rem;
+  border-radius: 8px;
+  background: #ececec;
+  color: #444444;
+  font-size: 0.7rem;
+}
+
+#sidebar .doc-count {
+  flex: 0 1 auto;
+  font-size: 0.75rem;
+  color: #666666;
+}
+
 #editor {
   grid-area: editor;
   display: flex;

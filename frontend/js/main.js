@@ -1,5 +1,6 @@
 import { state } from "./state.js";
 import { getConfig, getTree } from "./api.js";
+import { renderSidebar } from "./sidebar.js";
 
 // When true the user-facing banner is the only error surface and the browser's
 // native error reporting is suppressed; derived from the document element so a
@@ -24,13 +25,6 @@ function renderHeader() {
   projectName.textContent = config.project_name ?? "sdlc";
   const model = config.model ?? "unknown";
   aiStatus.textContent = config.ai_configured ? `AI ready (${model})` : "AI not configured";
-}
-
-function renderSidebarPlaceholder() {
-  sidebar.replaceChildren();
-  const paragraph = document.createElement("p");
-  paragraph.textContent = "The document tree will appear here once the project has a layout.";
-  sidebar.appendChild(paragraph);
 }
 
 function renderEditorPlaceholder() {
@@ -112,7 +106,7 @@ async function boot() {
   }
 
   hideError();
-  renderSidebarPlaceholder();
+  renderSidebar();
   renderEditorPlaceholder();
   renderChatPlaceholder();
   installErrorBanner();
@@ -133,6 +127,7 @@ async function boot() {
 
   if (tree) {
     state.tree = tree;
+    renderSidebar();
   }
 
   if (failures.length > 0) {

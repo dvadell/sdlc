@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0018", "0021"]
 ---
 
@@ -34,15 +34,15 @@ document when clicked.
 
 ## Acceptance criteria
 
-- [ ] All groups render in order with correct counts.
-- [ ] Epic and feature status show their allowed values; absent/invalid status
+- [x] All groups render in order with correct counts.
+- [x] Epic and feature status show their allowed values; absent/invalid status
       shows no badge.
-- [ ] Tickets show their number; epics show their ticket count.
-- [ ] The selected row is visibly active after a re-render.
-- [ ] A stale selection (deleted file) is cleared.
-- [ ] Titles are inserted with `textContent`; a title containing `<b>` is shown
+- [x] Tickets show their number; epics show their ticket count.
+- [x] The selected row is visibly active after a re-render.
+- [x] A stale selection (deleted file) is cleared.
+- [x] Titles are inserted with `textContent`; a title containing `<b>` is shown
   literally.
-- [ ] Empty groups are hidden.
+- [x] Empty groups are hidden.
 
 ## Tests
 
