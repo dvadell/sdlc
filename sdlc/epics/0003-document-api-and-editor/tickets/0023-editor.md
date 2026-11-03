@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0019", "0021"]
 ---
 
@@ -36,13 +36,13 @@ update the stored hash only from the server response.
 
 ## Acceptance criteria
 
-- [ ] Load, edit, save, reload shows the change.
-- [ ] Dirty marker appears on first keystroke and clears only after success.
-- [ ] Ctrl/Cmd+S saves; the browser save dialog does not open.
-- [ ] A failed save keeps the text and shows the error.
-- [ ] Switching documents with unsaved changes asks first.
-- [ ] A CRLF document stays CRLF after save; LF stays LF.
-- [ ] Saving a document that changed underneath returns 409 (handled in 0027).
+- [x] Load, edit, save, reload shows the change.
+- [x] Dirty marker appears on first keystroke and clears only after success.
+- [x] Ctrl/Cmd+S saves; the browser save dialog does not open.
+- [x] A failed save keeps the text and shows the error.
+- [x] Switching documents with unsaved changes asks first.
+- [x] A CRLF document stays CRLF after save; LF stays LF.
+- [x] Saving a document that changed underneath returns 409 (handled in 0027).
 
 ## Tests
 

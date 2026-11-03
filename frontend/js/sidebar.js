@@ -43,7 +43,7 @@ function loadDocument(path) {
 }
 
 function createCurrent() {
-  return { path: null, content: "", hash: null };
+  return { path: null, content: "", savedContent: "", hash: null };
 }
 
 let container = null;
@@ -301,6 +301,7 @@ export async function refreshTree() {
     }
     current.path = null;
     current.content = "";
+    current.savedContent = "";
     current.hash = null;
     state.dirty = false;
   }

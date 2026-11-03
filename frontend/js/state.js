@@ -7,7 +7,14 @@ export const state = {
   tree: null,
   // The selected document: its validated path, content and the hash the content
   // was loaded at.
-  current: { path: null, content: "", hash: null },
+  current: {
+    path: null,
+    content: "",
+    // The content the textarea is compared against; it only changes on load and
+    // after a successful save, never while the person types.
+    savedContent: "",
+    hash: null,
+  },
   // Whether the current document has unsaved edits.
   dirty: false,
   // Chat panel state: the messages and whether a stream is running. The

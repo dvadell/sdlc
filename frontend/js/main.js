@@ -1,13 +1,8 @@
 import { state } from "./state.js";
 import { getConfig, getTree } from "./api.js";
-import { renderSidebar } from "./sidebar.js";
-
-// When true the user-facing banner is the only error surface and the browser's
-// native error reporting is suppressed; derived from the document element so a
-// deployment can opt in without a rebuild. Native reporting stays on while it is
-// not set to "suppress".
-const SUPPRESS_NATIVE_ERRORS =
-  document.documentElement.dataset.errorBanner === "suppress";
+import { renderSidebar, setEditorLoadDocument } from "./sidebar.js";
+import { loadDocument, save } from "./editor.js";
+import { hideError, installErrorBanner, showError } from "./errors.js";
 
 const projectName = document.querySelector("#project-name");
 const aiStatus = document.querySelector("#ai-status");
@@ -34,61 +29,25 @@ function renderEditorPlaceholder() {
   editor.appendChild(paragraph);
 }
 
-function showError(error) {
-  const detail = error instanceof Error ? error.message : String(error);
-  const code = error && error.code ? ` (${error.code})` : "";
-  banner.textContent = `The request failed${code}: ${detail}`;
-  renderDismiss();
-  banner.hidden = false;
-  app.style.paddingTop = `${banner.offsetHeight}px`;
-  app.classList.add("error-banner-open");
-}
-
-function renderDismiss() {
-  const dismiss = document.createElement("button");
-  dismiss.type = "button";
-  dismiss.textContent = "Dismiss";
-  dismiss.addEventListener("click", () => hideError());
-  banner.appendChild(dismiss);
-}
-
-function hideError() {
-  banner.hidden = true;
-  app.style.paddingTop = "";
-  app.classList.remove("error-banner-open");
-}
-
 function renderChatPlaceholder() {
   chatPlaceholder.textContent = state.chat.placeholder;
 }
 
-function installErrorBanner() {
-  window.addEventListener("error", onError);
-  window.addEventListener("unhandledrejection", onUnhandledRejection);
-}
-
-function normalizeError(value, fallback = "a request failed") {
-  if (value instanceof Error) {
-    return value;
-  }
-  const message = typeof value === "string" ? value : value?.message ?? fallback;
-  return new Error(message);
-}
-
-function onError(event) {
-  console.error("Unhandled error:", event.error ?? event.message, event.filename, event.lineno);
-  if (SUPPRESS_NATIVE_ERRORS) {
-    event.preventDefault();
-  }
-  showError(normalizeError(event.error ?? event.message));
-}
-
-function onUnhandledRejection(event) {
-  console.error("Unhandled rejection:", event.reason);
-  if (SUPPRESS_NATIVE_ERRORS) {
-    event.preventDefault();
-  }
-  showError(normalizeError(event.reason, "a request failed"));
+// The global save shortcut: Ctrl/Cmd+S saves and suppresses the browser save
+// dialog. Ctrl/Cmd+Enter is deliberately not bound.
+function installSaveShortcut() {
+  window.addEventListener("keydown", (event) => {
+    const key = event.key?.toLowerCase?.() ?? "";
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      key === "s"
+    ) {
+      event.preventDefault();
+      save().catch((error) => showError(error));
+    }
+  });
 }
 
 async function boot() {
@@ -110,6 +69,8 @@ async function boot() {
   renderEditorPlaceholder();
   renderChatPlaceholder();
   installErrorBanner();
+  setEditorLoadDocument((path) => loadDocument(path));
+  installSaveShortcut();
 
   const results = await Promise.allSettled([getConfig(), getTree()]);
   const failures = results
