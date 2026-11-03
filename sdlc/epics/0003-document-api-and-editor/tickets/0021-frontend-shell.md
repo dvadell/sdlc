@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0005"]
 ---
 
@@ -35,12 +35,12 @@ call, with no framework and no build step.
 
 ## Acceptance criteria
 
-- [ ] Page loads with no console errors and shows the project name.
-- [ ] AI status reflects `/api/config`.
-- [ ] All API functions use relative URLs, never a hard-coded port.
-- [ ] A failed request shows a readable banner, not an unhandled rejection.
-- [ ] No `innerHTML` outside the future preview path.
-- [ ] Works from `http://localhost:<port>` and `http://127.0.0.1:<port>`.
+- [x] Page loads with no console errors and shows the project name.
+- [x] AI status reflects `/api/config`.
+- [x] All API functions use relative URLs, never a hard-coded port.
+- [x] A failed request shows a readable banner, not an unhandled rejection.
+- [x] No `innerHTML` outside the future preview path.
+- [x] Works from `http://localhost:<port>` and `http://127.0.0.1:<port>`.
 
 ## Tests
 

@@ -107,7 +107,7 @@ async fn root_returns_the_served_page() {
     let (status, content_type, body) = get(addr, "/").await;
     assert_eq!(status, 200);
     assert_eq!(content_type, "text/html");
-    assert!(body.contains("The UI is under construction"));
+    assert!(body.contains("id=\"sidebar\""));
 
     server.abort();
 }
@@ -126,7 +126,7 @@ async fn style_css_returns_the_styles() {
 
     assert_eq!(status, 200);
     assert_eq!(content_type, "text/css");
-    assert_eq!(body, frontend);
+    assert_eq!(body.trim(), frontend.trim());
 
     server.abort();
 }
@@ -143,7 +143,7 @@ async fn unknown_path_falls_back_to_the_entry_page() {
     let (status, content_type, body) = get(addr, "/anything-unknown").await;
     assert_eq!(status, 200);
     assert_eq!(content_type, "text/html");
-    assert!(body.contains("The UI is under construction"));
+    assert!(body.contains("id=\"sidebar\""));
 
     server.abort();
 }

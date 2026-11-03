@@ -93,7 +93,7 @@ async fn serve_on_ephemeral_port_responds_at_root() {
     let (status, content_type, body) = get_response(addr).await;
     assert_eq!(status, 200);
     assert_eq!(content_type, "text/html");
-    assert!(body.contains("The UI is under construction."));
+    assert!(body.contains("id=\"sidebar\""));
 
     server.abort();
 }

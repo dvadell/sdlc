@@ -16,11 +16,16 @@ lint:
 test:
     cargo test
 
+# Run the frontend API tests.
+frontend-test:
+    node --test frontend/js/api.test.mjs
+
 # Run all checks: format, lint, and tests.
 check:
     cargo fmt --all -- --check
     cargo clippy --all-targets -- -D warnings
     cargo test
+    just frontend-test
 
 # Build the release binary.
 release:
