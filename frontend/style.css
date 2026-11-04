@@ -155,6 +155,7 @@ body {
 /* The per-group creation and per-row mutation actions of the sidebar (ticket
    0025). The row itself stays the selection control; the actions sit beside it. */
 #sidebar .new-doc,
+#sidebar .scaffold,
 #sidebar .doc-action {
   padding: 0.1rem 0.5rem;
   font: inherit;
@@ -167,13 +168,16 @@ body {
 }
 
 #sidebar .new-doc:hover,
+#sidebar .scaffold:hover,
 #sidebar .doc-action:hover,
 #sidebar .new-doc:focus-visible,
+#sidebar .scaffold:focus-visible,
 #sidebar .doc-action:focus-visible {
   background: #e4e4e4;
 }
 
 #sidebar .new-doc:disabled,
+#sidebar .scaffold:disabled,
 #sidebar .doc-action:disabled {
   opacity: 0.6;
   cursor: default;

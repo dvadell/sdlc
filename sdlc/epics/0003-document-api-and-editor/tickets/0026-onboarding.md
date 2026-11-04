@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0017", "0021"]
 ---
 
@@ -29,12 +29,12 @@ starter documents, without doing it behind the person's back.
 
 ## Acceptance criteria
 
-- [ ] Empty project shows the onboarding state, not an empty sidebar.
-- [ ] Nothing is written until the button is clicked.
-- [ ] A successful scaffold opens the PRD and lists all core files.
-- [ ] A second click/reload no longer shows onboarding.
-- [ ] Existing custom files survive a partial scaffold.
-- [ ] A read-only project shows a clear error.
+- [x] Empty project shows the onboarding state, not an empty sidebar.
+- [x] Nothing is written until the button is clicked.
+- [x] A successful scaffold opens the PRD and lists all core files.
+- [x] A second click/reload no longer shows onboarding.
+- [x] Existing custom files survive a partial scaffold.
+- [x] A read-only project shows a clear error.
 
 ## Tests
 

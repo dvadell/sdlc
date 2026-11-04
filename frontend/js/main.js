@@ -1,6 +1,10 @@
 import { state } from "./state.js";
 import { getConfig, getTree } from "./api.js";
-import { renderSidebar, setEditorLoadDocument } from "./sidebar.js";
+import {
+  renderSidebar,
+  setEditorLoadDocument,
+  starterNeedsScaffolding,
+} from "./sidebar.js";
 import { loadDocument, save } from "./editor.js";
 import { hideError, installErrorBanner, showError } from "./errors.js";
 
@@ -89,6 +93,12 @@ async function boot() {
   if (tree) {
     state.tree = tree;
     renderSidebar();
+  }
+
+  if (tree && starterNeedsScaffolding(tree)) {
+    // The empty-layout onboarding replaces the editor content until the person
+    // creates the starter documents (ticket 0026).
+    editor.replaceChildren();
   }
 
   if (failures.length > 0) {

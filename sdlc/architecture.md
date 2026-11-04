@@ -123,6 +123,7 @@ A single-page app written in plain HTML, CSS and JavaScript (ES modules, no fram
 - **Editor:** a plain `<textarea>` for Markdown source, with a preview toggle.
 - **Diff view:** replaces the editor when a proposal is pending. It shows the unified diff computed by the server, one section per affected file, with added and removed lines colored, and accept-all / reject-all buttons.
 - **Chat panel:** message list, input, attach-document control, and the built-in prompt shortcuts.
+- **Onboarding:** when the project has no starter layout yet, the sidebar shows the empty state instead of a document tree, with one sentence, the path that would be created and a create-starter-documents action. Nothing is written until the person clicks the action, and a successful scaffold refreshes the tree and opens the PRD.
 
 Rendered Markdown (both the person's documents and AI output) is converted with `marked` and sanitized with `DOMPurify` before insertion into the page. Both libraries are single files committed to the repository (`frontend/vendor/`). Chat uses `fetch` with a streamed response body, because `EventSource` only supports GET; the file-change events use `EventSource`.
 

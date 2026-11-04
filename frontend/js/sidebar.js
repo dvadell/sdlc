@@ -1,7 +1,7 @@
 // The document tree panel of the sidebar (ticket 0022).
 
 import { state } from "./state.js";
-import { createDoc, deleteDoc, getTree, moveDoc } from "./api.js";
+import { createDoc, deleteDoc, getTree, moveDoc, scaffold } from "./api.js";
 import { showError } from "./errors.js";
 import { clearEditor } from "./editor.js";
 
@@ -30,6 +30,33 @@ const CREATABLE_GROUPS = {
   ticket: { kind: "ticket", label: "ticket" },
 };
 
+// The starter layout of a project: the core documents the scaffold creates, in
+// the order the server writes them (ticket 0017). The first one missing from the
+// tree is the path the empty state offers to create, so a partial project only
+// fills the gaps and never touches files that already exist.
+const STARTER_CORE_PATHS = [
+  "sdlc/PRD.md",
+  "sdlc/architecture.md",
+  "sdlc/conventions.md",
+  "AGENTS.md",
+];
+
+// The entry document a successful scaffold opens: the PRD leads the scaffolded
+// project (ticket 0026).
+const STARTER_PRD_PATH = "sdlc/PRD.md";
+
+// The starter core documents the project is still missing, in scaffold order.
+export function missingStarterPaths(tree) {
+  const present = new Set((tree?.docs ?? []).map((doc) => doc.path));
+  return STARTER_CORE_PATHS.filter((path) => !present.has(path));
+}
+
+// Whether the project still lacks the starter layout and should show the empty
+// state instead of a document tree (ticket 0026).
+export function starterNeedsScaffolding(tree) {
+  return missingStarterPaths(tree).length > 0;
+}
+
 // One mutation runs at a time; its buttons are disabled while the request is in
 // flight and re-enabled afterwards. The flag lives at module level because the
 // tree refresh inside a mutation replaces the buttons mid-flight.
@@ -37,7 +64,9 @@ let actionsDisabled = false;
 
 function setActionsDisabled(disabled) {
   actionsDisabled = disabled;
-  const buttons = document.querySelectorAll("#sidebar .new-doc, #sidebar .doc-action");
+  const buttons = document.querySelectorAll(
+    "#sidebar .new-doc, #sidebar .scaffold, #sidebar .doc-action",
+  );
   for (const button of buttons) {
     button.disabled = disabled;
   }
@@ -406,6 +435,51 @@ export function entryTitle(entry) {
   return { number, text };
 }
 
+// The empty-layout onboarding of the sidebar: one sentence, the path that would
+// be created and the explicit create action. Nothing is written until the person
+// clicks the button, and scaffold failures surface in the global banner.
+function renderOnboarding(tree) {
+  const element = getContainer();
+  if (element === null) {
+    return;
+  }
+
+  element.replaceChildren();
+
+  const message = document.createElement("p");
+  message.textContent =
+    "This project has no starter document layout yet, so there is nothing to edit.";
+  const path = document.createElement("p");
+  const missing = missingStarterPaths(tree);
+  path.textContent = `The starter documents would be created at ${missing[0]}.`;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "scaffold";
+  button.textContent = "Create starter documents";
+  button.disabled = actionsDisabled;
+  button.addEventListener("click", () => {
+    void createStarterDocuments();
+  });
+
+  element.append(message, path, button);
+}
+
+// Creates the starter layout on an explicit click, then refreshes the tree and
+// opens the PRD, so a successful scaffold replaces the empty state with the
+// scaffolded project instead of leaving the onboarding behind (ticket 0026).
+async function createStarterDocuments() {
+  setActionsDisabled(true);
+  try {
+    await scaffold();
+    await refreshTree();
+    await loadDocument(STARTER_PRD_PATH);
+  } catch (error) {
+    showError(error);
+  } finally {
+    setActionsDisabled(false);
+  }
+}
+
 // Rebuilds the sidebar from `state.tree`, highlighting the selected document.
 export function renderSidebar() {
   const element = getContainer();
@@ -416,10 +490,15 @@ export function renderSidebar() {
   element.replaceChildren();
 
   const tree = state.tree;
-  if (!tree || !tree.layout_exists) {
+  if (!tree) {
     const paragraph = document.createElement("p");
     paragraph.textContent = PLACEHOLDER;
     element.appendChild(paragraph);
+    return;
+  }
+
+  if (starterNeedsScaffolding(tree)) {
+    renderOnboarding(tree);
     return;
   }
 
