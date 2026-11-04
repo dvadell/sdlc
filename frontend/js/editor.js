@@ -267,6 +267,7 @@ export function clearEditor() {
   state.current.savedContent = "";
   state.current.hash = null;
   state.dirty = false;
+  saveInFlight = false;
   renderEditor();
   renderDirtyIndicator();
 }

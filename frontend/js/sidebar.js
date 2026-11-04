@@ -31,8 +31,12 @@ const CREATABLE_GROUPS = {
 };
 
 // One mutation runs at a time; its buttons are disabled while the request is in
-// flight and re-enabled afterwards.
+// flight and re-enabled afterwards. The flag lives at module level because the
+// tree refresh inside a mutation replaces the buttons mid-flight.
+let actionsDisabled = false;
+
 function setActionsDisabled(disabled) {
+  actionsDisabled = disabled;
   const buttons = document.querySelectorAll("#sidebar .new-doc, #sidebar .doc-action");
   for (const button of buttons) {
     button.disabled = disabled;
@@ -100,6 +104,18 @@ function renameDestination(entry, newTitle) {
   return `sdlc/features/${slug}.md`;
 }
 
+// The feature slug an entry belongs to: tickets carry their normalized
+// `feature` binding, features take it from their own path stem.
+function entryFeatureSlug(entry) {
+  const binding = entry?.feature;
+  if (typeof binding === "string" && binding.length > 0) {
+    return binding.replace(/\.md$/, "");
+  }
+  const segments = entry?.path?.split("/") ?? [];
+  const stem = segments[segments.length - 1] ?? "";
+  return stem.replace(/\.md$/, "");
+}
+
 // How many tickets still name the given feature, for the delete confirmation.
 function orphanedTicketCount(feature) {
   const docs = state.tree?.docs ?? [];
@@ -110,7 +126,7 @@ function orphanedTicketCount(feature) {
 // of an epic or feature that would be affected.
 function deleteMessage(entry) {
   const path = entry.path;
-  const message = `Delete ${entry.kind} "${entry.title}" at ${path}? This cannot be undone.`;
+  let message = `Delete ${entry.kind} "${entry.title}" at ${path}? This cannot be undone.`;
   if (entry.kind === "epic") {
     const epic = path.split("/")[2] ?? "";
     const count = ticketCount(state.tree?.docs ?? [], epic);
@@ -119,7 +135,7 @@ function deleteMessage(entry) {
     }
   }
   if (entry.kind === "feature") {
-    const feature = (path.split("/")[2] ?? "").replace(/\.md$/, "");
+    const feature = entryFeatureSlug(entry);
     const orphaned = orphanedTicketCount(feature);
     if (orphaned > 0) {
       message += ` ${orphaned} ${orphaned === 1 ? "ticket still references it" : "tickets still reference it"}.`;
@@ -171,6 +187,9 @@ async function createFromGroup(group) {
   setActionsDisabled(true);
   try {
     const created = await createDoc(kind, trimmedTitle, epic, feature);
+    if (typeof created?.path !== "string" || created.path.length === 0) {
+      throw new Error("The server did not return a document path.");
+    }
     await selectAfterMutation(created.path);
   } catch (error) {
     showError(error);
@@ -191,11 +210,21 @@ async function renameFromEntry(entry) {
     // An empty title is refused by the server; never send it.
     return;
   }
+  const slug = slugifyTitle(title);
+  if (slug.length === 0) {
+    // A title that slugifies to nothing can never name a document; refuse it
+    // before building a destination path the server would reject.
+    showError(new Error("The new title does not produce a usable document name."));
+    return;
+  }
   const to = renameDestination(entry, title);
 
   setActionsDisabled(true);
   try {
     const moved = await moveDoc(entry.path, to);
+    if (typeof moved?.path !== "string" || moved.path.length === 0) {
+      throw new Error("The server did not return the renamed document path.");
+    }
     await selectAfterMutation(moved.path);
   } catch (error) {
     showError(error);
@@ -434,6 +463,7 @@ function createNewButton(group) {
   button.type = "button";
   button.className = "new-doc";
   button.textContent = `New ${CREATABLE_GROUPS[group].label}`;
+  button.disabled = actionsDisabled;
   button.addEventListener("click", () => {
     void createFromGroup(group);
   });
@@ -501,6 +531,7 @@ function createRowActions(entry) {
   rename.type = "button";
   rename.className = "doc-action";
   rename.textContent = "Rename";
+  rename.disabled = actionsDisabled;
   rename.addEventListener("click", () => {
     void renameFromEntry(entry);
   });
@@ -509,6 +540,7 @@ function createRowActions(entry) {
   remove.type = "button";
   remove.className = "doc-action";
   remove.textContent = "Delete";
+  remove.disabled = actionsDisabled;
   remove.addEventListener("click", () => {
     void deleteFromEntry(entry);
   });
