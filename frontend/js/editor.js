@@ -54,10 +54,10 @@ function isDirty() {
 function renderDirtyIndicator() {
   const indicator = document.querySelector("#doc-dirty");
   const path = state.current?.path;
-  if (!indicator || !path) {
+  if (!indicator) {
     return;
   }
-  if (!state.dirty) {
+  if (!path || !state.dirty) {
     indicator.hidden = true;
     return;
   }
@@ -159,10 +159,10 @@ function showConflictBanner() {
       return;
     }
     conflictActionInFlight = true;
-    reloadButton.disabled = true;
+    setConflictButtonsDisabled(true);
     void reloadFromDisk().finally(() => {
       conflictActionInFlight = false;
-      reloadButton.disabled = false;
+      setConflictButtonsDisabled(false);
     });
   });
 
@@ -176,10 +176,10 @@ function showConflictBanner() {
       return;
     }
     conflictActionInFlight = true;
-    overwriteButton.disabled = true;
+    setConflictButtonsDisabled(true);
     void overwriteWithMine().finally(() => {
       conflictActionInFlight = false;
-      overwriteButton.disabled = false;
+      setConflictButtonsDisabled(false);
     });
   });
 
@@ -307,10 +307,6 @@ async function reloadFromDisk() {
   if (!path) {
     return;
   }
-  if (state.current?.path !== path) {
-    // The conflict belonged to another document that is no longer selected.
-    return;
-  }
   hideConflictBanner();
   try {
     await loadDocument(path);
@@ -413,17 +409,19 @@ export async function save() {
   if (thisSaveButton) {
     thisSaveButton.disabled = true;
   }
-  const content = toSavedContent(textarea ? textarea.value : (state.current?.content ?? ""));
   try {
     if (!isSelected(path)) {
       // The person switched documents before the save was started; do not issue
       // a request on behalf of the now-deselected document.
+      renderDirtyIndicator();
       return;
     }
+    const content = toSavedContent(textarea ? textarea.value : (state.current?.content ?? ""));
     const response = await saveDoc(path, content, state.current?.hash);
     if (!isSelected(path)) {
       // The person switched documents while the save was in flight; the response
       // belongs to the old path and must not be applied to the new selection.
+      renderDirtyIndicator();
       return;
     }
     state.current.hash = response.hash;
