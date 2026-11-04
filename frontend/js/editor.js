@@ -1,8 +1,8 @@
 //! The document editor: textarea, dirty state, save and preview (tickets 0023
-//! and 0024).
+//! and 0024), plus the save conflict banner (ticket 0027).
 
 import { state } from "./state.js";
-import { getDoc, saveDoc } from "./api.js";
+import { ApiError, getDoc, saveDoc } from "./api.js";
 import { showError } from "./errors.js";
 
 // The textarea of the selected document; null until a document is loaded.
@@ -22,6 +22,10 @@ let previewVisible = false;
 // The caret of the textarea when it was hidden behind the preview; restored on
 // switching back to source.
 let previewCaret = null;
+
+// The save conflict banner of the selected document (ticket 0027); null until a
+// document is loaded and rebuilt by `renderEditor`.
+let conflictBanner = null;
 
 // The textarea normalizes line endings to `\n`; a document that was stored with
 // CRLF has to be converted back before it reaches the server, or every save
@@ -79,12 +83,21 @@ export function renderEditor() {
     textarea = null;
     saveButton = null;
     previewButton = null;
+    conflictBanner = null;
     return;
   }
 
   element.replaceChildren();
   previewVisible = false;
   previewCaret = null;
+
+  // The conflict banner lives inside the editor area so it can sit above the
+  // toolbar while the person keeps typing (ticket 0027); it is rebuilt on every
+  // render, so it starts hidden again for each freshly loaded document.
+  conflictBanner = document.createElement("div");
+  conflictBanner.id = "conflict-banner";
+  conflictBanner.className = "conflict-banner";
+  conflictBanner.hidden = true;
 
   const toolbar = document.createElement("div");
   toolbar.className = "editor-toolbar";
@@ -115,8 +128,52 @@ export function renderEditor() {
     renderDirtyIndicator();
   });
 
+  element.appendChild(conflictBanner);
   element.appendChild(toolbar);
   element.appendChild(textarea);
+}
+
+// Shows the non-modal save conflict banner: the disk changed since the person
+// opened the document, so the local text is kept and the choice is theirs
+// (ticket 0027). Never auto-merges and never retries.
+function showConflictBanner() {
+  if (!conflictBanner) {
+    return;
+  }
+  conflictBanner.replaceChildren();
+
+  const message = document.createElement("p");
+  message.className = "conflict-banner-message";
+  message.textContent = "This file changed on disk since you opened it.";
+
+  const reloadButton = document.createElement("button");
+  reloadButton.type = "button";
+  reloadButton.id = "conflict-reload";
+  reloadButton.textContent = "Reload from disk";
+  reloadButton.addEventListener("click", () => {
+    void reloadFromDisk();
+  });
+
+  const overwriteButton = document.createElement("button");
+  overwriteButton.type = "button";
+  overwriteButton.id = "conflict-overwrite";
+  overwriteButton.textContent = "Overwrite with mine";
+  // Explicit and destructive; deliberately not the default focus.
+  overwriteButton.addEventListener("click", () => {
+    void overwriteWithMine();
+  });
+
+  conflictBanner.append(message, reloadButton, overwriteButton);
+  conflictBanner.hidden = false;
+}
+
+// Hides the save conflict banner after a choice was applied or the conflict was
+// resolved another way.
+function hideConflictBanner() {
+  if (!conflictBanner) {
+    return;
+  }
+  conflictBanner.hidden = true;
 }
 
 // Renders the markdown of the selected document into the preview element: the
@@ -208,6 +265,54 @@ export function togglePreview() {
   updatePreviewButton();
 }
 
+// Reloads the selected document from disk, discarding the local text after the
+// person confirmed. Refetches through the API instead of trusting
+// `state.current.content`, and keeps the selected document on success (ticket
+// 0027).
+async function reloadFromDisk() {
+  const path = state.current.path;
+  hideConflictBanner();
+  try {
+    await loadDocument(path);
+  } catch (error) {
+    // The file may have been deleted externally while the conflict was shown; the
+    // local text stays in the editor either way.
+    showError(error);
+  }
+}
+
+// Overwrites the stored document with the local textarea content, after fetching
+// a fresh hash from the server. The person chose this explicitly; if the write
+// conflicts again the banner is shown again and the flow stops instead of
+// looping (ticket 0027).
+async function overwriteWithMine() {
+  const path = state.current.path;
+  hideConflictBanner();
+  try {
+    const document = await getDoc(path);
+    const content = toSavedContent(textarea ? textarea.value : (state.current.content ?? ""));
+    const response = await saveDoc(path, content, document.hash);
+    if (state.current.path !== path) {
+      // The person switched documents while overwriting; the response belongs to
+      // the old path and must not be applied to the new selection.
+      return;
+    }
+    state.current.hash = response.hash;
+    state.current.savedContent = content;
+    state.current.content = textarea ? textarea.value : (state.current.content ?? "");
+    state.dirty = isDirty();
+    renderDirtyIndicator();
+    hideConflictBanner();
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "conflict") {
+      // The disk changed again while overwriting; report the conflict and stop.
+      showConflictBanner();
+      return;
+    }
+    showError(error);
+  }
+}
+
 // Loads a document into the editor, asking before discarding unsaved changes.
 export async function loadDocument(path) {
   if (state.dirty) {
@@ -263,10 +368,16 @@ export async function save() {
     state.dirty = isDirty();
     renderDirtyIndicator();
   } catch (error) {
-    // Keep the text and the dirty state; the banner shows the error. Only mark
-    // the current document dirty when this save still belonged to it.
+    // Keep the text and the dirty state; the conflict banner offers the choices,
+    // every other failure falls through to the error banner. Only mark the
+    // current document dirty when this save still belonged to it.
     if (state.current.path === path) {
       state.dirty = true;
+    }
+    if (error instanceof ApiError && error.code === "conflict") {
+      // The disk moved under the local text; keep it and let the person choose.
+      showConflictBanner();
+      return;
     }
     throw error;
   } finally {

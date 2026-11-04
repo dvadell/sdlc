@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0023"]
 ---
 
@@ -32,12 +32,12 @@ reloading the disk version and explicitly overwriting it.
 
 ## Acceptance criteria
 
-- [ ] A simulated external write makes the next save show the banner.
-- [ ] Local text is still present and dirty in both choices.
-- [ ] Reload shows the disk version and clears dirty.
-- [ ] Overwrite writes the local version and updates the stored hash.
-- [ ] A second conflict during overwrite is reported, not looped.
-- [ ] No file changes unless the person chooses an action.
+- [x] A simulated external write makes the next save show the banner.
+- [x] Local text is still present and dirty in both choices.
+- [x] Reload shows the disk version and clears dirty.
+- [x] Overwrite writes the local version and updates the stored hash.
+- [x] A second conflict during overwrite is reported, not looped.
+- [x] No file changes unless the person chooses an action.
 
 ## Tests
 

@@ -373,6 +373,48 @@ body {
   color: #1a1a1a;
 }
 
+/* The save conflict banner of the editor (ticket 0027): a non-modal banner in the
+   editor area, so the person keeps the local text and keeps typing while the
+   choice is pending. The overwrite action is destructive and explicitly labelled;
+   it is never the default focus. */
+.conflict-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: #fdf6e3;
+  border-bottom: 1px solid #ecd9a0;
+  color: #6b5310;
+  font-size: 0.9rem;
+}
+
+.conflict-banner[hidden] {
+  display: none;
+}
+
+.conflict-banner-message {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.conflict-banner button {
+  padding: 0.1rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+/* The overwrite action is the destructive one; mark it visually as such without
+   making it the default focus. */
+.conflict-banner button#conflict-overwrite {
+  background: #fdecec;
+  border-color: #f3c1c1;
+  color: #8c1f1f;
+}
+
 .error-banner {
   position: fixed;
   top: 0;
