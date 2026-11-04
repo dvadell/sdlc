@@ -30,7 +30,7 @@ let conflictBanner = null;
 // The textarea normalizes line endings to `\n`; a document that was stored with
 // CRLF has to be converted back before it reaches the server, or every save
 // rewrites the file as LF and produces a whole-file diff.
-function toSavedContent(value, saved = state.current.savedContent ?? "") {
+function toSavedContent(value, saved = state.current?.savedContent ?? "") {
   if (saved.includes("\r\n")) {
     return value.replace(/\n/g, "\r\n");
   }
@@ -148,29 +148,16 @@ function showConflictBanner() {
   message.className = "conflict-banner-message";
   message.textContent = "This file changed on disk since you opened it.";
 
-  const reloadButton = document.createElement("button");
-  reloadButton.type = "button";
-  reloadButton.id = "conflict-reload";
-  reloadButton.textContent = "Reload from disk";
-  reloadButton.addEventListener("click", () => {
-    void reloadFromDisk();
-  });
-
-  const overwriteButton = document.createElement("button");
-  overwriteButton.type = "button";
-  overwriteButton.id = "conflict-overwrite";
-  overwriteButton.textContent = "Overwrite with mine";
-  // Explicit and destructive; deliberately not the default focus.
-  overwriteButton.addEventListener("click", () => {
-    void overwriteWithMine();
-  });
-
   let conflictActionInFlight = false;
   const setConflictButtonsDisabled = (disabled) => {
     reloadButton.disabled = disabled;
     overwriteButton.disabled = disabled;
   };
 
+  const reloadButton = document.createElement("button");
+  reloadButton.type = "button";
+  reloadButton.id = "conflict-reload";
+  reloadButton.textContent = "Reload from disk";
   reloadButton.addEventListener("click", () => {
     if (conflictActionInFlight) {
       return;
@@ -183,6 +170,11 @@ function showConflictBanner() {
     });
   });
 
+  const overwriteButton = document.createElement("button");
+  overwriteButton.type = "button";
+  overwriteButton.id = "conflict-overwrite";
+  overwriteButton.textContent = "Overwrite with mine";
+  // Explicit and destructive; deliberately not the default focus.
   overwriteButton.addEventListener("click", () => {
     if (conflictActionInFlight) {
       return;
@@ -208,6 +200,16 @@ function hideConflictBanner() {
   }
   conflictBanner.hidden = true;
   conflictBanner.setAttribute("aria-hidden", "true");
+}
+
+// Whether the document a save or conflict action ran against is still the
+// selected one; repaints the dirty indicator when the selection moved.
+function stillSelected(path) {
+  if (state.current?.path !== path) {
+    renderDirtyIndicator();
+    return false;
+  }
+  return true;
 }
 
 // Renders the markdown of the selected document into the preview element: the
@@ -308,10 +310,6 @@ async function reloadFromDisk() {
   if (!path) {
     return;
   }
-  if (state.current?.path !== path) {
-    // The conflict belonged to another document that is no longer selected.
-    return;
-  }
   hideConflictBanner();
   try {
     await loadDocument(path);
@@ -338,32 +336,29 @@ async function overwriteWithMine() {
   }
   hideConflictBanner();
   const localText = textarea ? textarea.value : (state.current.content ?? "");
-  const savedContent = state.current.savedContent ?? "";
+  const savedContent = state.current?.savedContent ?? "";
   try {
-    if (state.current?.path !== path) {
+    if (!stillSelected(path)) {
       // The person switched documents while overwriting; the response belongs to
       // the old path and must not be applied to the new selection.
-      renderDirtyIndicator();
       return;
     }
     const document = await getDoc(path);
-    if (state.current?.path !== path) {
+    if (!stillSelected(path)) {
       // The selection moved while the fresh hash was loading; do not write text
       // belonging to another document under this path.
-      renderDirtyIndicator();
       return;
     }
     const content = toSavedContent(localText, savedContent);
     const response = await saveDoc(path, content, document.hash);
-    if (state.current?.path !== path) {
+    if (!stillSelected(path)) {
       // The person switched documents while the overwrite was in flight; the
       // response belongs to the old path and must not be applied to the new one.
-      renderDirtyIndicator();
       return;
     }
     state.current.hash = response.hash;
     state.current.savedContent = content;
-    state.current.content = localText;
+    state.current.content = textarea ? textarea.value : localText;
     state.dirty = isDirty();
     renderDirtyIndicator();
     hideConflictBanner();
@@ -420,10 +415,10 @@ export async function save() {
   if (thisSaveButton) {
     thisSaveButton.disabled = true;
   }
-  const content = toSavedContent(textarea ? textarea.value : (state.current.content ?? ""));
+  const content = toSavedContent(textarea ? textarea.value : (state.current?.content ?? ""));
   try {
     const response = await saveDoc(path, content, state.current.hash);
-    if (state.current?.path !== path) {
+    if (!stillSelected(path)) {
       // The person switched documents while the save was in flight; the response
       // belongs to the old path and must not be applied to the new selection.
       return;
