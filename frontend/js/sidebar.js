@@ -492,7 +492,14 @@ export function renderSidebar() {
   element.replaceChildren();
 
   const tree = state.tree;
-  if (!tree || !tree.layout_exists) {
+  if (!tree) {
+    const paragraph = document.createElement("p");
+    paragraph.textContent = PLACEHOLDER;
+    element.appendChild(paragraph);
+    return;
+  }
+
+  if (!tree.layout_exists) {
     if (starterNeedsScaffolding(tree)) {
       renderOnboarding(tree);
       return;
