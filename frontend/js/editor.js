@@ -30,8 +30,7 @@ let conflictBanner = null;
 // The textarea normalizes line endings to `\n`; a document that was stored with
 // CRLF has to be converted back before it reaches the server, or every save
 // rewrites the file as LF and produces a whole-file diff.
-function toSavedContent(value) {
-  const saved = state.current.savedContent ?? "";
+function toSavedContent(value, saved = state.current.savedContent ?? "") {
   if (saved.includes("\r\n")) {
     return value.replace(/\n/g, "\r\n");
   }
@@ -47,8 +46,8 @@ function normalizeNewlines(value) {
 // comparable. Without a connected textarea the comparison falls back to the
 // stored content, so a dirty document can still be saved later.
 function isDirty() {
-  const current = (textarea?.isConnected ? textarea.value : (state.current.content ?? ""));
-  const saved = state.current.savedContent ?? "";
+  const current = (textarea?.isConnected ? textarea.value : (state.current?.content ?? ""));
+  const saved = state.current?.savedContent ?? "";
   return normalizeNewlines(current) !== normalizeNewlines(saved);
 }
 
@@ -97,7 +96,10 @@ export function renderEditor() {
   conflictBanner = document.createElement("div");
   conflictBanner.id = "conflict-banner";
   conflictBanner.className = "conflict-banner";
+  conflictBanner.setAttribute("role", "alert");
+  conflictBanner.setAttribute("aria-live", "assertive");
   conflictBanner.hidden = true;
+  conflictBanner.setAttribute("aria-hidden", "true");
 
   const toolbar = document.createElement("div");
   toolbar.className = "editor-toolbar";
@@ -163,8 +165,39 @@ function showConflictBanner() {
     void overwriteWithMine();
   });
 
+  let conflictActionInFlight = false;
+  const setConflictButtonsDisabled = (disabled) => {
+    reloadButton.disabled = disabled;
+    overwriteButton.disabled = disabled;
+  };
+
+  reloadButton.addEventListener("click", () => {
+    if (conflictActionInFlight) {
+      return;
+    }
+    conflictActionInFlight = true;
+    setConflictButtonsDisabled(true);
+    void reloadFromDisk().finally(() => {
+      conflictActionInFlight = false;
+      setConflictButtonsDisabled(false);
+    });
+  });
+
+  overwriteButton.addEventListener("click", () => {
+    if (conflictActionInFlight) {
+      return;
+    }
+    conflictActionInFlight = true;
+    setConflictButtonsDisabled(true);
+    void overwriteWithMine().finally(() => {
+      conflictActionInFlight = false;
+      setConflictButtonsDisabled(false);
+    });
+  });
+
   conflictBanner.append(message, reloadButton, overwriteButton);
   conflictBanner.hidden = false;
+  conflictBanner.setAttribute("aria-hidden", "false");
 }
 
 // Hides the save conflict banner after a choice was applied or the conflict was
@@ -174,6 +207,7 @@ function hideConflictBanner() {
     return;
   }
   conflictBanner.hidden = true;
+  conflictBanner.setAttribute("aria-hidden", "true");
 }
 
 // Renders the markdown of the selected document into the preview element: the
@@ -270,11 +304,23 @@ export function togglePreview() {
 // `state.current.content`, and keeps the selected document on success (ticket
 // 0027).
 async function reloadFromDisk() {
-  const path = state.current.path;
+  const path = state.current?.path;
+  if (!path) {
+    return;
+  }
+  if (state.current?.path !== path) {
+    // The conflict belonged to another document that is no longer selected.
+    return;
+  }
   hideConflictBanner();
   try {
     await loadDocument(path);
   } catch (error) {
+    if (error?.message === "load cancelled") {
+      // The person declined the discard; keep the conflict choice available.
+      showConflictBanner();
+      return;
+    }
     // The file may have been deleted externally while the conflict was shown; the
     // local text stays in the editor either way.
     showError(error);
@@ -286,27 +332,47 @@ async function reloadFromDisk() {
 // conflicts again the banner is shown again and the flow stops instead of
 // looping (ticket 0027).
 async function overwriteWithMine() {
-  const path = state.current.path;
+  const path = state.current?.path;
+  if (!path) {
+    return;
+  }
   hideConflictBanner();
+  const localText = textarea ? textarea.value : (state.current.content ?? "");
+  const savedContent = state.current.savedContent ?? "";
   try {
-    const document = await getDoc(path);
-    const content = toSavedContent(textarea ? textarea.value : (state.current.content ?? ""));
-    const response = await saveDoc(path, content, document.hash);
-    if (state.current.path !== path) {
+    if (state.current?.path !== path) {
       // The person switched documents while overwriting; the response belongs to
       // the old path and must not be applied to the new selection.
+      renderDirtyIndicator();
+      return;
+    }
+    const document = await getDoc(path);
+    if (state.current?.path !== path) {
+      // The selection moved while the fresh hash was loading; do not write text
+      // belonging to another document under this path.
+      renderDirtyIndicator();
+      return;
+    }
+    const content = toSavedContent(localText, savedContent);
+    const response = await saveDoc(path, content, document.hash);
+    if (state.current?.path !== path) {
+      // The person switched documents while the overwrite was in flight; the
+      // response belongs to the old path and must not be applied to the new one.
+      renderDirtyIndicator();
       return;
     }
     state.current.hash = response.hash;
     state.current.savedContent = content;
-    state.current.content = textarea ? textarea.value : (state.current.content ?? "");
+    state.current.content = localText;
     state.dirty = isDirty();
     renderDirtyIndicator();
     hideConflictBanner();
   } catch (error) {
     if (error instanceof ApiError && error.code === "conflict") {
       // The disk changed again while overwriting; report the conflict and stop.
-      showConflictBanner();
+      if (state.current?.path === path) {
+        showConflictBanner();
+      }
       return;
     }
     showError(error);
@@ -344,7 +410,8 @@ export async function loadDocument(path) {
 // is clean or a save is already in flight; the stored hash is only trusted from
 // the server response, never from an optimistic update.
 export async function save() {
-  if (saveInFlight || !isDirty()) {
+  const path = state.current?.path;
+  if (saveInFlight || !path || !isDirty()) {
     return Promise.resolve();
   }
 
@@ -353,11 +420,10 @@ export async function save() {
   if (thisSaveButton) {
     thisSaveButton.disabled = true;
   }
-  const path = state.current.path;
+  const content = toSavedContent(textarea ? textarea.value : (state.current.content ?? ""));
   try {
-    const content = toSavedContent(textarea ? textarea.value : (state.current.content ?? ""));
     const response = await saveDoc(path, content, state.current.hash);
-    if (state.current.path !== path) {
+    if (state.current?.path !== path) {
       // The person switched documents while the save was in flight; the response
       // belongs to the old path and must not be applied to the new selection.
       return;
@@ -371,12 +437,14 @@ export async function save() {
     // Keep the text and the dirty state; the conflict banner offers the choices,
     // every other failure falls through to the error banner. Only mark the
     // current document dirty when this save still belonged to it.
-    if (state.current.path === path) {
+    if (state.current?.path === path) {
       state.dirty = true;
     }
     if (error instanceof ApiError && error.code === "conflict") {
       // The disk moved under the local text; keep it and let the person choose.
-      showConflictBanner();
+      if (state.current?.path === path) {
+        showConflictBanner();
+      }
       return;
     }
     throw error;
