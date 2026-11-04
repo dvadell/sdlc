@@ -451,7 +451,8 @@ function renderOnboarding(tree) {
     "This project has no starter document layout yet, so there is nothing to edit.";
   const path = document.createElement("p");
   const missing = missingStarterPaths(tree);
-  path.textContent = `The starter documents would be created at ${missing[0]}.`;
+  const firstMissing = missing[0] ?? "the starter layout";
+  path.textContent = `The starter documents would be created at ${firstMissing}.`;
   const button = document.createElement("button");
   button.type = "button";
   button.className = "scaffold";
@@ -473,6 +474,7 @@ async function createStarterDocuments() {
     await scaffold();
     await refreshTree();
     await loadDocument(STARTER_PRD_PATH);
+    renderSidebar();
   } catch (error) {
     showError(error);
   } finally {
@@ -490,7 +492,11 @@ export function renderSidebar() {
   element.replaceChildren();
 
   const tree = state.tree;
-  if (!tree) {
+  if (!tree || !tree.layout_exists) {
+    if (starterNeedsScaffolding(tree)) {
+      renderOnboarding(tree);
+      return;
+    }
     const paragraph = document.createElement("p");
     paragraph.textContent = PLACEHOLDER;
     element.appendChild(paragraph);
