@@ -53,11 +53,11 @@ function isDirty() {
 
 function renderDirtyIndicator() {
   const indicator = document.querySelector("#doc-dirty");
-  const path = state.current.path;
-  if (!indicator) {
+  const path = state.current?.path;
+  if (!indicator || !path) {
     return;
   }
-  if (!state.dirty || !path) {
+  if (!state.dirty) {
     indicator.hidden = true;
     return;
   }
@@ -149,10 +149,6 @@ function showConflictBanner() {
   message.textContent = "This file changed on disk since you opened it.";
 
   let conflictActionInFlight = false;
-  const setConflictButtonsDisabled = (disabled) => {
-    reloadButton.disabled = disabled;
-    overwriteButton.disabled = disabled;
-  };
 
   const reloadButton = document.createElement("button");
   reloadButton.type = "button";
@@ -163,10 +159,10 @@ function showConflictBanner() {
       return;
     }
     conflictActionInFlight = true;
-    setConflictButtonsDisabled(true);
+    reloadButton.disabled = true;
     void reloadFromDisk().finally(() => {
       conflictActionInFlight = false;
-      setConflictButtonsDisabled(false);
+      reloadButton.disabled = false;
     });
   });
 
@@ -180,12 +176,17 @@ function showConflictBanner() {
       return;
     }
     conflictActionInFlight = true;
-    setConflictButtonsDisabled(true);
+    overwriteButton.disabled = true;
     void overwriteWithMine().finally(() => {
       conflictActionInFlight = false;
-      setConflictButtonsDisabled(false);
+      overwriteButton.disabled = false;
     });
   });
+
+  const setConflictButtonsDisabled = (disabled) => {
+    reloadButton.disabled = disabled;
+    overwriteButton.disabled = disabled;
+  };
 
   conflictBanner.append(message, reloadButton, overwriteButton);
   conflictBanner.hidden = false;
@@ -203,13 +204,9 @@ function hideConflictBanner() {
 }
 
 // Whether the document a save or conflict action ran against is still the
-// selected one; repaints the dirty indicator when the selection moved.
-function stillSelected(path) {
-  if (state.current?.path !== path) {
-    renderDirtyIndicator();
-    return false;
-  }
-  return true;
+// selected one.
+function isSelected(path) {
+  return state.current?.path === path;
 }
 
 // Renders the markdown of the selected document into the preview element: the
@@ -310,6 +307,10 @@ async function reloadFromDisk() {
   if (!path) {
     return;
   }
+  if (state.current?.path !== path) {
+    // The conflict belonged to another document that is no longer selected.
+    return;
+  }
   hideConflictBanner();
   try {
     await loadDocument(path);
@@ -335,30 +336,27 @@ async function overwriteWithMine() {
     return;
   }
   hideConflictBanner();
-  const localText = textarea ? textarea.value : (state.current.content ?? "");
+  const localText = textarea ? textarea.value : (state.current?.content ?? "");
   const savedContent = state.current?.savedContent ?? "";
   try {
-    if (!stillSelected(path)) {
-      // The person switched documents while overwriting; the response belongs to
-      // the old path and must not be applied to the new selection.
+    if (!isSelected(path)) {
+      renderDirtyIndicator();
       return;
     }
     const document = await getDoc(path);
-    if (!stillSelected(path)) {
-      // The selection moved while the fresh hash was loading; do not write text
-      // belonging to another document under this path.
+    if (!isSelected(path)) {
+      renderDirtyIndicator();
       return;
     }
     const content = toSavedContent(localText, savedContent);
     const response = await saveDoc(path, content, document.hash);
-    if (!stillSelected(path)) {
-      // The person switched documents while the overwrite was in flight; the
-      // response belongs to the old path and must not be applied to the new one.
+    if (!isSelected(path)) {
+      renderDirtyIndicator();
       return;
     }
     state.current.hash = response.hash;
     state.current.savedContent = content;
-    state.current.content = textarea ? textarea.value : localText;
+    state.current.content = localText;
     state.dirty = isDirty();
     renderDirtyIndicator();
     hideConflictBanner();
@@ -417,8 +415,13 @@ export async function save() {
   }
   const content = toSavedContent(textarea ? textarea.value : (state.current?.content ?? ""));
   try {
-    const response = await saveDoc(path, content, state.current.hash);
-    if (!stillSelected(path)) {
+    if (!isSelected(path)) {
+      // The person switched documents before the save was started; do not issue
+      // a request on behalf of the now-deselected document.
+      return;
+    }
+    const response = await saveDoc(path, content, state.current?.hash);
+    if (!isSelected(path)) {
       // The person switched documents while the save was in flight; the response
       // belongs to the old path and must not be applied to the new selection.
       return;
