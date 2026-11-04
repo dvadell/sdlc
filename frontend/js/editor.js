@@ -40,13 +40,12 @@ function normalizeNewlines(value) {
 
 // The dirty state is the textarea value against the content the document was
 // loaded or last saved at; both are normalized so a CRLF document stays
-// comparable.
+// comparable. Without a connected textarea the comparison falls back to the
+// stored content, so a dirty document can still be saved later.
 function isDirty() {
-  if (!textarea) {
-    return false;
-  }
+  const current = (textarea?.isConnected ? textarea.value : (state.current.content ?? ""));
   const saved = state.current.savedContent ?? "";
-  return normalizeNewlines(textarea.value) !== normalizeNewlines(saved);
+  return normalizeNewlines(current) !== normalizeNewlines(saved);
 }
 
 function renderDirtyIndicator() {
@@ -64,10 +63,22 @@ function renderDirtyIndicator() {
   indicator.hidden = false;
 }
 
+// The vendored markdown renderer and sanitizer; both must be loaded before a
+// preview can render.
+function librariesReady() {
+  return (
+    typeof globalThis.marked?.parse === "function" &&
+    typeof globalThis.DOMPurify?.sanitize === "function"
+  );
+}
+
 // Replaces the editor area with the save toolbar and the textarea.
 export function renderEditor() {
   const element = document.querySelector("#editor");
   if (!element) {
+    textarea = null;
+    saveButton = null;
+    previewButton = null;
     return;
   }
 
@@ -118,10 +129,17 @@ function renderPreview() {
   if (!previewElement) {
     return;
   }
-  const markdown = textarea?.value ?? state.current.content ?? "";
+  if (!librariesReady()) {
+    previewElement.textContent = "Preview could not be rendered.";
+    return;
+  }
+  const liveTextarea = document.querySelector("#document-content");
+  const markdown = liveTextarea?.isConnected
+    ? liveTextarea.value
+    : (textarea?.isConnected ? textarea.value : (state.current.content ?? ""));
   let html;
   try {
-    html = DOMPurify.sanitize(marked.parse(String(markdown)));
+    html = DOMPurify.sanitize(marked.parse(String(markdown ?? "")));
   } catch (error) {
     previewElement.textContent = "Preview could not be rendered.";
     return;
@@ -152,10 +170,7 @@ export function togglePreview() {
     return;
   }
 
-  if (
-    typeof globalThis.marked?.parse !== "function" ||
-    typeof globalThis.DOMPurify?.sanitize !== "function"
-  ) {
+  if (!librariesReady()) {
     showError(new Error("Preview libraries failed to load."));
     return;
   }
@@ -212,6 +227,9 @@ export async function loadDocument(path) {
   state.dirty = false;
 
   renderEditor();
+  if (!textarea) {
+    throw new Error("The editor is unavailable.");
+  }
   textarea.value = document.content;
   textarea.focus();
   renderDirtyIndicator();
@@ -241,7 +259,7 @@ export async function save() {
     }
     state.current.hash = response.hash;
     state.current.savedContent = content;
-    state.current.content = textarea.value;
+    state.current.content = textarea ? textarea.value : (state.current.content ?? "");
     state.dirty = isDirty();
     renderDirtyIndicator();
   } catch (error) {
