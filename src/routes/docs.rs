@@ -65,6 +65,11 @@ pub(crate) struct SaveRequest {
 pub(crate) struct SaveResponse {
     /// Lowercase hex SHA-256 of the bytes that were written.
     hash: String,
+    /// Warnings from refreshing the PRD feature index after a feature save, so
+    /// the person knows the index may be stale; absent for every other document
+    /// and when nothing went wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warnings: Option<Vec<String>>,
 }
 
 /// The body of a create request.
@@ -89,6 +94,10 @@ pub(crate) struct CreateResponse {
     path: String,
     /// Lowercase hex SHA-256 of the content that was written.
     hash: String,
+    /// Warnings from refreshing the PRD feature index after a created feature,
+    /// so the person knows the index may be stale; absent for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warnings: Option<Vec<String>>,
 }
 
 /// The body of a move request.
@@ -105,14 +114,22 @@ pub(crate) struct MoveRequest {
 pub(crate) struct MoveResponse {
     /// The validated project-relative path after the move.
     path: String,
+    /// Warnings from refreshing the PRD feature index after a renamed feature,
+    /// so the person knows the index may be stale; absent when no feature moved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warnings: Option<Vec<String>>,
 }
 
 /// The result of a delete.
 #[derive(Debug, Serialize)]
 pub(crate) struct DeleteResponse {
     /// Tickets left pointing at a deleted feature; only present for a feature.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     orphaned_tickets: Option<usize>,
+    /// Warnings from refreshing the PRD feature index after a deleted feature,
+    /// so the person knows the index may be stale; absent for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    warnings: Option<Vec<String>>,
 }
 
 /// The empty JSON object accepted by the scaffold route.
@@ -208,7 +225,9 @@ pub(crate) async fn put_doc(
         .write(&path, &content, &Expectation::Existing(expected_hash))
         .await?;
 
-    Ok(Json(SaveResponse { hash }))
+    let warnings = feature_refresh_warnings(&state, &[&path]).await;
+
+    Ok(Json(SaveResponse { hash, warnings }))
 }
 
 /// Handles `POST /api/docs`.
@@ -239,11 +258,16 @@ pub(crate) async fn create_doc(
         .map_err(|error| map_create_error(kind, feature.is_some(), error))?;
     let document = state.store.read(&created).await?;
 
+    // The refresh eligibility is derived from the created path, so a feature
+    // created through the API keeps the PRD feature index in sync.
+    let warnings = feature_refresh_warnings(&state, &[&created]).await;
+
     Ok((
         StatusCode::CREATED,
         Json(CreateResponse {
             path: path_string(&created),
             hash: document.hash,
+            warnings,
         }),
     ))
 }
@@ -261,8 +285,14 @@ pub(crate) async fn move_doc(
     let to = DocPath::parse(&request.to)?;
     let moved = state.store.rename(&from, &to).await?;
 
+    // The refresh eligibility is derived from both the source and the
+    // destination, so a rename that ever crosses kinds still refreshes the PRD
+    // feature index whenever a feature is involved.
+    let warnings = feature_refresh_warnings(&state, &[&from, &to]).await;
+
     Ok(Json(MoveResponse {
         path: path_string(&moved),
+        warnings,
     }))
 }
 
@@ -276,7 +306,12 @@ pub(crate) async fn delete_doc(
     let orphaned_tickets =
         (layout::kind(path.as_path()) == Some(DocKind::Feature)).then_some(report.orphaned_tickets);
 
-    Ok(Json(DeleteResponse { orphaned_tickets }))
+    let warnings = feature_refresh_warnings(&state, &[&path]).await;
+
+    Ok(Json(DeleteResponse {
+        orphaned_tickets,
+        warnings,
+    }))
 }
 
 /// Handles `POST /api/scaffold`.
@@ -374,6 +409,24 @@ fn ensure_expected_hash(expected_hash: &str) -> Result<(), ApiError> {
     }
 }
 
+/// Refreshes the PRD feature index after a feature change and collects the
+/// warnings for the response; every other document leaves the PRD alone, so
+/// editing a non-feature document never touches it. Returns the refresh
+/// warnings, or `None` when no refresh applied or nothing went wrong. The
+/// refresh runs whenever any of the given paths is a feature, so callers pass
+/// every path a mutation may have touched.
+async fn feature_refresh_warnings(state: &AppState, paths: &[&DocPath]) -> Option<Vec<String>> {
+    if paths
+        .iter()
+        .any(|path| layout::kind(path.as_path()) == Some(DocKind::Feature))
+    {
+        let warnings = state.store.refresh_feature_index().await;
+        (!warnings.is_empty()).then_some(warnings)
+    } else {
+        None
+    }
+}
+
 /// Parses a wildcard capture into a [`DocPath`].
 ///
 /// Axum 0.8 normally captures a wildcard without its leading slash, but the
@@ -398,6 +451,8 @@ fn no_store(response: impl IntoResponse) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{CliArgs, Config};
+    use serde_json::json;
 
     #[test]
     fn parses_a_captured_path_with_or_without_a_leading_slash() {
@@ -442,5 +497,85 @@ mod tests {
         }
 
         assert!(ensure_expected_hash("abc").is_ok());
+    }
+
+    #[test]
+    fn save_response_serializes_the_optional_warnings_array() {
+        let response = SaveResponse {
+            hash: "abc".to_string(),
+            warnings: Some(vec!["the PRD feature index was not refreshed".to_string()]),
+        };
+
+        let value = serde_json::to_value(&response).expect("the save response should serialize");
+        assert_eq!(value["hash"], json!("abc"));
+        assert_eq!(
+            value["warnings"],
+            json!(["the PRD feature index was not refreshed"])
+        );
+    }
+
+    #[test]
+    fn save_response_omits_warnings_when_there_are_none() {
+        let response = SaveResponse {
+            hash: "abc".to_string(),
+            warnings: None,
+        };
+
+        let value = serde_json::to_value(&response).expect("the save response should serialize");
+
+        assert!(value.get("warnings").is_none());
+    }
+
+    fn test_app_state() -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = Config::from_parts(
+            CliArgs {
+                dir: dir.path().to_path_buf(),
+                port: 0,
+                open: false,
+            },
+            |_| None,
+        )
+        .expect("the test config should build");
+
+        (AppState::new(config, 0), dir)
+    }
+
+    #[tokio::test]
+    async fn refresh_runs_when_a_rename_co_involves_a_feature() {
+        let (state, _dir) = test_app_state();
+
+        let feature = DocPath::parse("sdlc/features/export.md").expect("valid feature");
+        let decision = DocPath::parse("sdlc/decisions/0001-use-axum.md").expect("valid decision");
+
+        // A rename of a feature refreshes the PRD feature index, whether the
+        // source or the destination is the feature.
+        assert!(
+            feature_refresh_warnings(&state, &[&feature, &decision])
+                .await
+                .is_some(),
+            "a rename whose source is a feature must refresh the index"
+        );
+        assert!(
+            feature_refresh_warnings(&state, &[&decision, &feature])
+                .await
+                .is_some(),
+            "a rename whose destination is a feature must refresh the index"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_skips_documents_that_are_not_features() {
+        let (state, _dir) = test_app_state();
+
+        let decision = DocPath::parse("sdlc/decisions/0001-use-axum.md").expect("valid decision");
+        let core = DocPath::parse("sdlc/PRD.md").expect("valid core document");
+
+        assert!(
+            feature_refresh_warnings(&state, &[&decision, &core])
+                .await
+                .is_none(),
+            "a rename without a feature must not refresh the index"
+        );
     }
 }

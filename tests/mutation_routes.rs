@@ -709,7 +709,12 @@ async fn delete_a_feature_reports_the_orphaned_tickets() {
 
     assert_eq!(response.status, 200);
     assert_eq!(response.header("content-type"), Some("application/json"));
-    assert_eq!(response.json(), json!({ "orphaned_tickets": 1 }));
+    let json = response.json();
+    assert_eq!(json["orphaned_tickets"], json!(1));
+    let warnings = json["warnings"]
+        .as_array()
+        .expect("a feature delete against a missing PRD carries index warnings");
+    assert_eq!(warnings.len(), 1, "the project has no PRD yet");
     assert!(!dir.path().join("sdlc/features/export.md").exists());
     assert!(
         dir.path().join(&ticket_path).is_file(),

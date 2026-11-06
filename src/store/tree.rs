@@ -6,6 +6,8 @@
 //! so a path that is not a document never gets a tree entry, and one unreadable
 //! file never fails the whole listing.
 
+use std::path::Path;
+
 use crate::store::frontmatter;
 use crate::store::layout::{self, CoreDoc, DocKind};
 use crate::store::path::DocPath;
@@ -220,6 +222,87 @@ impl DocStore {
     }
 }
 
+/// The feature entries of one project, in store order, for the PRD feature index.
+///
+/// This is the single feature traversal behind the PRD feature index refresh, so
+/// the rendered index cannot drift from the feature part of [`DocStore::tree`]: it
+/// applies the same filtering, reading, title/status extraction and sort order.
+/// Like the tree listing it is best effort, and the entries it skips are reported
+/// as warnings, so a refresh can surface an incomplete index instead of silently
+/// rendering one from a partial list.
+pub(crate) fn feature_entries(root: &Path) -> (Vec<DocEntry>, Vec<String>) {
+    let features_dir = root.join("sdlc").join("features");
+    let Ok(directory) = std::fs::read_dir(&features_dir) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in directory.filter_map(|entry| entry.ok()) {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        let raw = format!("sdlc/features/{file_name}");
+        let Ok(path) = DocPath::parse(&raw) else {
+            warnings.push(format!(
+                "the PRD feature index was not refreshed: skipping {raw}: not a valid feature path"
+            ));
+            continue;
+        };
+        if layout::kind(path.as_path()) != Some(DocKind::Feature) {
+            warnings.push(format!(
+                "the PRD feature index was not refreshed: skipping {raw}: not a feature"
+            ));
+            continue;
+        }
+
+        // Canonicalize before reading, so a symlink that escapes the project
+        // root is rejected before its content can reach the rendered index, the
+        // same containment rule the tree read path applies.
+        let file_path = root.join("sdlc").join("features").join(&file_name);
+        let resolved = match std::fs::canonicalize(&file_path) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                warnings.push(format!(
+                    "the PRD feature index was not refreshed: skipping {raw}: {error}"
+                ));
+                continue;
+            }
+        };
+        let resolved = match crate::store::ensure_inside_root(root, &path, resolved) {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                warnings.push(format!(
+                    "the PRD feature index was not refreshed: skipping {file_name}: resolves outside the project root"
+                ));
+                continue;
+            }
+        };
+
+        let document = match crate::store::read_document(&resolved, &path) {
+            Ok(document) => document,
+            Err(error) => {
+                warnings.push(format!(
+                    "the PRD feature index was not refreshed: skipping feature {file_name}: {error}"
+                ));
+                continue;
+            }
+        };
+
+        entries.push(DocEntry {
+            path,
+            kind: DocKind::Feature,
+            title: title_of(&document.content, &file_name),
+            status: frontmatter::parse_feature(&document.content, &file_name)
+                .status
+                .map(|status| status.as_str().to_string()),
+            epic: None,
+            feature: None,
+        });
+    }
+
+    entries.sort_by(|left, right| left.title.cmp(&right.title));
+    (entries, warnings)
+}
+
 /// The status and optional feature binding of a document, parsed from a
 /// single front matter pass. Only tickets carry a feature binding.
 fn metadata_of(kind: DocKind, content: &str, file: &str) -> (Option<String>, Option<String>) {
@@ -255,7 +338,7 @@ fn names_kind(raw: &str, kind: DocKind) -> bool {
 
 /// Extracts the document title: the first ATX H1 outside front matter and
 /// fenced code blocks, falling back to the humanized file name.
-fn title_of(content: &str, file: &str) -> String {
+pub(crate) fn title_of(content: &str, file: &str) -> String {
     let (_, body) = frontmatter::split(content);
     let mut in_fence = false;
     for line in body.lines() {
@@ -535,6 +618,54 @@ mod tests {
         assert_eq!(entry.kind, DocKind::Ticket);
         assert_eq!(entry.status.as_deref(), Some("todo"));
         assert_eq!(entry.feature.as_deref(), Some("export"));
+    }
+
+    #[test]
+    fn feature_entries_collects_features_in_store_order_and_skips_invalid_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let features = dir.path().join("sdlc").join("features");
+        std::fs::create_dir_all(&features).expect("features dir");
+        std::fs::write(
+            features.join("export.md"),
+            "---\nstatus: shipped\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+        std::fs::write(features.join("Bad.md"), "# Bad\n").expect("write the bad feature");
+
+        let (entries, warnings) = feature_entries(dir.path());
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "Export");
+        assert_eq!(entries[0].status.as_deref(), Some("shipped"));
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the invalid feature should be skipped with a warning"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn feature_entries_rejects_a_symlink_that_escapes_the_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let features = dir.path().join("sdlc").join("features");
+        std::fs::create_dir_all(&features).expect("features dir");
+        let outside = dir
+            .path()
+            .parent()
+            .expect("the tempdir parent")
+            .join("sdlc-feature-escape.md");
+        std::fs::write(&outside, "# Escaped\n").expect("write the outside file");
+        std::os::unix::fs::symlink(&outside, features.join("evil.md")).expect("create the symlink");
+
+        let (entries, warnings) = feature_entries(dir.path());
+
+        assert!(entries.is_empty());
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the escaping symlink should be skipped with a warning"
+        );
     }
 
     #[tokio::test]

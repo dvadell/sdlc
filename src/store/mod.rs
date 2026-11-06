@@ -25,6 +25,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::store::index::{RewriteOutcome, rewrite};
+
+/// The project-relative path of the PRD the feature index is rendered into.
+const PRD_PATH: &str = "sdlc/PRD.md";
+
 /// Errors from the document store.
 ///
 /// HTTP mapping is added by a later ticket; the store deliberately knows
@@ -186,7 +191,7 @@ impl DocStore {
                 let resolved = tokio::fs::canonicalize(&joined)
                     .await
                     .map_err(|err| map_resolution_error(path, err))?;
-                self.ensure_inside_root(path, resolved)
+                ensure_inside_root(&self.root, path, resolved)
             }
             ResolveMode::NewFile => {
                 let relative = path.as_path();
@@ -196,20 +201,10 @@ impl DocStore {
                 let resolved_parent = tokio::fs::canonicalize(&joined_parent)
                     .await
                     .map_err(|err| map_resolution_error(path, err))?;
-                let resolved_parent = self.ensure_inside_root(path, resolved_parent)?;
+                let resolved_parent = ensure_inside_root(&self.root, path, resolved_parent)?;
 
                 Ok(resolved_parent.join(file_name))
             }
-        }
-    }
-
-    /// Returns `resolved` only when it is the root or lives below it.
-    fn ensure_inside_root(&self, path: &DocPath, resolved: PathBuf) -> Result<PathBuf, StoreError> {
-        if resolved.starts_with(&self.root) {
-            tracing::debug!(resolved = %resolved.display(), "resolved document path");
-            Ok(resolved)
-        } else {
-            Err(not_allowed(path.as_path()))
         }
     }
 
@@ -243,6 +238,11 @@ impl DocStore {
     /// over the target, so a failure never leaves a partial document behind.
     /// The returned hash is the hash of the content that was written, ready to
     /// be sent back by the next save.
+    ///
+    /// The PRD feature index refresh after a saved feature is the caller's
+    /// responsibility: callers that keep the index in sync invoke
+    /// [`DocStore::refresh_feature_index`] themselves and surface its warnings,
+    /// which is what the API layer does after a successful save.
     pub async fn write(
         &self,
         path: &DocPath,
@@ -254,6 +254,22 @@ impl DocStore {
         let owned_content = content.to_string();
         let owned_expectation = expectation.clone();
 
+        let written = self
+            .write_resolved(resolved, owned, owned_content, owned_expectation)
+            .await?;
+
+        Ok(written)
+    }
+
+    /// Runs the atomic check-and-write sequence for one already-resolved
+    /// document, holding the write lock across the check and the write.
+    async fn write_resolved(
+        &self,
+        resolved: PathBuf,
+        owned: DocPath,
+        owned_content: String,
+        owned_expectation: Expectation,
+    ) -> Result<String, StoreError> {
         let writes = self.writes.clone();
 
         tokio::task::spawn_blocking(move || -> Result<String, StoreError> {
@@ -271,6 +287,120 @@ impl DocStore {
         .map_err(|err| StoreError::Io(io::Error::other(err)))?
     }
 
+    /// Refreshes the PRD feature index after a feature changed (ticket 0029).
+    ///
+    /// This is the single refresh owner for the PRD feature index: the mutating
+    /// store methods deliberately do not refresh themselves, so callers that
+    /// keep the index in sync invoke this and surface its warnings themselves
+    /// (the API layer does, after a successful feature write, create, rename or
+    /// delete).
+    ///
+    /// Reads every feature entry, reads `sdlc/PRD.md` when present, and lets
+    /// the pure index writer render the replacement for the marked region; the
+    /// PRD is written only when the rendered index differs from the current
+    /// content, so an already-correct index is never rewritten.
+    ///
+    /// A missing PRD, missing markers or an unwritable PRD yield a warning
+    /// instead of a failure: the feature operation itself already succeeded and
+    /// must not be reported as failed because the index could not be updated.
+    ///
+    /// # TOCTOU
+    ///
+    /// The PRD read and write-back run inside one write critical section, so the
+    /// rendered index is written through the same critical section the feature
+    /// writes take; the feature list is captured before that critical section is
+    /// acquired, so the directory traversal and the feature reads do not hold the
+    /// write lock. The small race window that remains is between the feature list
+    /// capture and the PRD write-back, and it is accepted here, the same one the
+    /// feature writes accept.
+    pub async fn refresh_feature_index(&self) -> Vec<String> {
+        let owned_prd = match DocPath::parse(PRD_PATH) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(error = %error, "the PRD feature index cannot be refreshed");
+                return vec![format!("the PRD feature index was not refreshed: {error}")];
+            }
+        };
+
+        let writes = self.writes.clone();
+        let root = self.root.clone();
+
+        tokio::task::spawn_blocking(move || -> Vec<String> {
+            // Copy the feature list before taking the write lock, so the directory
+            // traversal and the feature reads do not hold it; the lock below guards
+            // only the PRD read and write-back.
+            let (entries, mut warnings) = tree::feature_entries(&root);
+
+            let _guard = writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            let resolved = match std::fs::canonicalize(root.join(owned_prd.as_path())) {
+                Ok(resolved) => resolved,
+                Err(source) => {
+                    let error = map_resolution_error(&owned_prd, source);
+                    tracing::warn!(error = %error, "the PRD feature index cannot be resolved");
+                    warnings.push(format!("the PRD feature index was not resolved: {error}"));
+                    return warnings;
+                }
+            };
+            let resolved = match ensure_inside_root(&root, &owned_prd, resolved) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    tracing::warn!(error = %error, "the PRD feature index cannot be resolved");
+                    warnings.push(format!("the PRD feature index was not resolved: {error}"));
+                    return warnings;
+                }
+            };
+            let document = match read_document(&resolved, &owned_prd) {
+                Ok(document) => document,
+                Err(error) => {
+                    tracing::warn!(error = %error, "the PRD feature index cannot be refreshed");
+                    warnings.push(format!("the PRD feature index was not refreshed: {error}"));
+                    return warnings;
+                }
+            };
+
+            let updated = match rewrite(&document.content, &entries) {
+                RewriteOutcome::Updated(updated) => updated,
+                RewriteOutcome::NoMarkers => {
+                    tracing::warn!(
+                        "the PRD feature index cannot be refreshed: the markers are missing"
+                    );
+                    warnings.push(
+                        "the PRD feature index was not refreshed: the feature index markers are missing"
+                            .to_string(),
+                    );
+                    return warnings;
+                }
+            };
+
+            if updated == document.content {
+                // The rendered index already matches, so the PRD is left untouched.
+                return warnings;
+            }
+
+            let expectation = Expectation::Existing(document.hash);
+            let write_result = save_critical(&resolved, &owned_prd, &updated, &expectation);
+            if let Err(error) = write_result {
+                tracing::warn!(error = %error, "the PRD feature index could not be written");
+                warnings.push(format!("the PRD feature index could not be written: {error}"));
+                return warnings;
+            }
+
+            warnings
+        })
+        .await
+        .map_err(|error| {
+            // The refresh task panicked or was cancelled; report that failure as
+            // a warning instead of hiding it behind a successful no-op refresh.
+            let error = io::Error::other(error);
+            tracing::warn!(error = %error, "the PRD feature index refresh task failed");
+            StoreError::Io(error)
+        })
+        .unwrap_or_else(|error| vec![format!("the PRD feature index was not refreshed: {error}")])
+    }
+
     /// Creates a document of `kind` from a built-in template (ticket 0015).
     ///
     /// The title is validated (trimmed, single line, at most
@@ -279,6 +409,10 @@ impl DocStore {
     /// [`Expectation::Missing`] so an existing document is never overwritten, and
     /// numbered kinds allocate their next number. A ticket is created inside an
     /// existing epic's `tickets/` directory with an optional feature binding.
+    ///
+    /// The PRD feature index refresh after creating a feature is the caller's
+    /// responsibility: callers that keep the index in sync invoke
+    /// [`DocStore::refresh_feature_index`] themselves and surface its warnings.
     pub async fn create(
         &self,
         kind: DocKind,
@@ -307,7 +441,8 @@ impl DocStore {
             }
             DocKind::Feature => {
                 let content = templates::feature_content(&title);
-                self.create_feature(&slug, &content).await
+                let path = self.create_feature(&slug, &content).await?;
+                Ok(path)
             }
             DocKind::Decision => {
                 self.create_decision_at_next(slug.clone(), move |number| {
@@ -434,6 +569,10 @@ impl DocStore {
     /// `description.md`. Tickets move only within their current epic.
     ///
     /// The check and the rename run inside one write critical section.
+    ///
+    /// The PRD feature index refresh after renaming a feature is the caller's
+    /// responsibility: callers that keep the index in sync invoke
+    /// [`DocStore::refresh_feature_index`] themselves and surface its warnings.
     pub async fn rename(&self, from: &DocPath, to: &DocPath) -> Result<DocPath, StoreError> {
         let source = self.resolve(from, ResolveMode::Existing).await?;
         let target = self.resolve_destination(to).await?;
@@ -460,6 +599,10 @@ impl DocStore {
     /// it, which the report counts without deleting or rewriting them.
     ///
     /// The removal runs inside one write critical section.
+    ///
+    /// The PRD feature index refresh after deleting a feature is the caller's
+    /// responsibility: callers that keep the index in sync invoke
+    /// [`DocStore::refresh_feature_index`] themselves and surface its warnings.
     pub async fn delete(&self, path: &DocPath) -> Result<DeleteReport, StoreError> {
         let resolved = self.resolve(path, ResolveMode::Existing).await?;
 
@@ -493,7 +636,7 @@ impl DocStore {
             let resolved_base = tokio::fs::canonicalize(&base)
                 .await
                 .map_err(|err| map_resolution_error(to, err))?;
-            let resolved_base = self.ensure_inside_root(to, resolved_base)?;
+            let resolved_base = ensure_inside_root(&self.root, to, resolved_base)?;
 
             return Ok(resolved_base.join(epic));
         }
@@ -841,6 +984,25 @@ fn sync_parent_dir(dir: &Path) -> Result<(), StoreError> {
 #[cfg(not(unix))]
 fn sync_parent_dir(_dir: &Path) -> Result<(), StoreError> {
     Ok(())
+}
+
+/// Returns `resolved` only when it is the root or lives below it.
+///
+/// A free function rather than a [`DocStore`] method so the PRD feature-index
+/// refresh can canonicalize and check the resolved path inside its own write
+/// critical section, where a `&self` borrow cannot be captured by a `'static`
+/// blocking closure.
+fn ensure_inside_root(
+    root: &Path,
+    path: &DocPath,
+    resolved: PathBuf,
+) -> Result<PathBuf, StoreError> {
+    if resolved.starts_with(root) {
+        tracing::debug!(resolved = %resolved.display(), "resolved document path");
+        Ok(resolved)
+    } else {
+        Err(not_allowed(path.as_path()))
+    }
 }
 
 /// Builds the path-shaped error used for every rejected resolution.
@@ -1575,6 +1737,161 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
             .expect("read the feature back");
         assert_eq!(content, "---\nstatus: planned\n---\n\n# Export\n");
+    }
+
+    // ------------------------------------------------------------------
+    // Ticket 0029: PRD feature index refresh
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refresh_feature_index_returns_a_warning_when_the_prd_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+        let prd = format!(
+            "# Product Requirements Document\n\n## Purpose\n\nTODO: write the purpose.\n\n{}\n{}\n",
+            crate::store::index::FEATURE_INDEX_START,
+            crate::store::index::FEATURE_INDEX_END,
+        );
+        std::fs::write(dir.path().join("sdlc/PRD.md"), prd).expect("write the prd");
+        let document_dir = dir.path().join("sdlc");
+        let permissions = std::fs::metadata(&document_dir)
+            .expect("read the document dir")
+            .permissions();
+        std::fs::set_permissions(&document_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("lock the document directory");
+
+        let warnings = store.refresh_feature_index().await;
+
+        std::fs::set_permissions(&document_dir, permissions).expect("restore the directory");
+        assert_eq!(warnings.len(), 1, "the refresh should warn, not fail");
+        assert!(
+            warnings[0].starts_with("the PRD feature index could not be written: "),
+            "the warning should carry the write error, got: {}",
+            warnings[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_after_a_rename_captures_the_renamed_feature() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+        let prd = format!(
+            "# Product Requirements Document\n\n## Purpose\n\nTODO: write the purpose.\n\n{}\n{}\n",
+            crate::store::index::FEATURE_INDEX_START,
+            crate::store::index::FEATURE_INDEX_END,
+        );
+        std::fs::write(dir.path().join("sdlc/PRD.md"), prd).expect("write the prd");
+
+        let renamed = store
+            .rename(
+                &DocPath::parse("sdlc/features/export.md").expect("valid feature"),
+                &DocPath::parse("sdlc/features/csv-export.md").expect("valid feature"),
+            )
+            .await
+            .expect("the feature should be renamed");
+        assert_eq!(
+            renamed.as_path().display().to_string(),
+            "sdlc/features/csv-export.md"
+        );
+
+        let warnings = store.refresh_feature_index().await;
+        assert!(
+            warnings.is_empty(),
+            "the refresh should not warn: {warnings:?}"
+        );
+
+        let prd = store.read(&prd_path()).await.expect("read the prd");
+        assert_eq!(
+            prd.content,
+            "# Product Requirements Document\n\n## Purpose\n\nTODO: write the purpose.\n\n<!-- sdlc:feature-index:start -->\n- [Export](features/csv-export.md) — planned\n<!-- sdlc:feature-index:end -->\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_returns_a_warning_when_a_feature_is_skipped() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(dir.path().join("sdlc/features/Bad.md"), "# Bad\n")
+            .expect("write the bad feature");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+        let prd = format!(
+            "# Product Requirements Document\n\n## Purpose\n\nTODO: write the purpose.\n\n{}\n{}\n",
+            crate::store::index::FEATURE_INDEX_START,
+            crate::store::index::FEATURE_INDEX_END,
+        );
+        std::fs::write(dir.path().join("sdlc/PRD.md"), prd).expect("write the prd");
+
+        let warnings = store.refresh_feature_index().await;
+
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the skipped feature should surface a warning: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("Bad.md"),
+            "the warning should name the skipped path: {}",
+            warnings[0]
+        );
+
+        let prd = store.read(&prd_path()).await.expect("read the prd");
+        assert!(
+            prd.content
+                .contains("- [Export](features/export.md) — planned")
+        );
+        assert!(!prd.content.contains("Bad"));
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_earlier_warnings_when_a_later_refresh_step_fails() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(dir.path().join("sdlc/features/Bad.md"), "# Bad\n")
+            .expect("write the bad feature");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+        // The PRD holds bytes that are not valid UTF-8, so the refresh cannot
+        // read it and must still surface the warning collected for the skipped
+        // feature instead of dropping it behind the fresh failure warning.
+        std::fs::write(dir.path().join("sdlc/PRD.md"), [0xff, 0xfe, b'b', b'r'])
+            .expect("write the prd");
+
+        let warnings = store.refresh_feature_index().await;
+
+        assert_eq!(
+            warnings.len(),
+            2,
+            "the skipped feature and the failed PRD read should both surface: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|warning| warning.contains("Bad.md")),
+            "the skip warning should survive the later refresh failure: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("the PRD feature index was not refreshed")),
+            "the failed PRD read should be reported: {warnings:?}"
+        );
     }
 
     // ------------------------------------------------------------------
