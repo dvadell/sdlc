@@ -1,0 +1,91 @@
+//! The status vocabularies of the document kinds that carry a status (ticket
+//! 0030).
+
+// A feature offers planned/in-progress/shipped; an epic planned/in-progress/done.
+// Every other kind has no status control at all.
+export const STATUS_OPTIONS = {
+  feature: ["planned", "in-progress", "shipped"],
+  epic: ["planned", "in-progress", "done"],
+};
+
+// Whether `value` is a lowercase kebab-case slug: alphanumeric words joined by
+// single hyphens, with no empty word, exactly like the server's `is_kebab`.
+function isKebabSlug(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const words = value.split("-");
+  if (words.some((word) => word.length === 0)) {
+    return false;
+  }
+  return words.every((word) => /^[a-z0-9]+$/.test(word));
+}
+
+// Whether `value` is a four-digit-prefixed numbered document name such as
+// `0007-add-export`, exactly like the server's `is_numbered_slug`.
+function isNumberedSlug(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const name = value;
+  const dash = name.indexOf("-");
+  if (dash <= 0) {
+    return false;
+  }
+  const prefix = name.slice(0, dash);
+  const slug = name.slice(dash + 1);
+  return prefix.length === 4 && /^[0-9]{4}$/.test(prefix) && isKebabSlug(slug);
+}
+
+// The status vocabulary kind of a document path, or null for kinds that carry
+// no status control (ticket 0030). Only features and epics have a status; a
+// ticket never gets a control because it has no status vocabulary. A feature is
+// a single file directly under `sdlc/features` named after a lowercase kebab-case
+// slug, and an epic the `description.md` of its own four-digit-prefixed epic
+// directory, so deeper paths never match. The path is normalized the way the
+// server normalizes a captured path and validates it (`parse_captured_path` drops
+// a leading slash, separators are `/` only and the layout is lowercase
+// kebab-case), so an equivalent path still resolves to the same kind; a path that
+// carries a backslash or a dot segment the server rejects never resolves to a
+// status kind here either, so a client-constructed path the server would refuse is
+// never treated as one the server would accept.
+export function statusKindOf(path) {
+  const segments = String(path ?? "")
+    .replace(/^\//, "")
+    .split("/");
+  const invalidSegment = (segment) =>
+    segment === ".." ||
+    segment === "." ||
+    segment === "" ||
+    segment.includes("\0") ||
+    segment.includes("\\");
+  if (segments.some((segment) => invalidSegment(segment))) {
+    // A path that the server's document path rules reject never carries a status
+    // control, so judge it strictly and return no kind for it instead of being
+    // lenient about backslash or dot-segmented paths the server would refuse
+    // (ticket 0030, final review round).
+    return null;
+  }
+  const file = segments[segments.length - 1] ?? "";
+  if (segments[0] === "sdlc" && segments[1] === "features" && segments.length === 3) {
+    // `sdlc/features/<slug>.md` is the whole feature; deeper paths are not, and
+    // the slug must be a lowercase kebab-case slug the server accepts.
+    if (file.length > 3 && file.endsWith(".md") && isKebabSlug(file.slice(0, -3))) {
+      return "feature";
+    }
+    return null;
+  }
+  if (
+    segments[0] === "sdlc" &&
+    segments[1] === "epics" &&
+    segments.length === 4 &&
+    file === "description.md"
+  ) {
+    // `sdlc/epics/<number>-<slug>/description.md` is the whole epic; the epic
+    // directory must be a four-digit-prefixed kebab-case name.
+    if (isNumberedSlug(segments[2] ?? "")) {
+      return "epic";
+    }
+  }
+  return null;
+}

@@ -16,9 +16,9 @@ lint:
 test:
     cargo test
 
-# Run the frontend API tests.
+# Run the frontend API and editor tests.
 frontend-test:
-    node --test frontend/js/api.test.mjs
+    node --test 'frontend/js/*.test.mjs'
 
 # Run all checks: format, lint, and tests.
 check:

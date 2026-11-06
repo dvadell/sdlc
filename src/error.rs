@@ -104,11 +104,15 @@ impl ApiError {
     }
 
     /// Wraps a fixed status, code and client-safe message into an error.
-    fn fixed(status: StatusCode, code: &'static str, message: &str) -> Self {
+    ///
+    /// The message accepts anything string-convertible (`&str` or an owned
+    /// `String` such as a formatted dynamic detail) so every fixed-status error
+    /// shares this single construction site.
+    fn fixed(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
             code,
-            message: message.to_string(),
+            message: message.into(),
         }
     }
 
@@ -154,9 +158,11 @@ impl From<StoreError> for ApiError {
                 "not_allowed",
                 "number cannot change",
             ),
-            StoreError::EpicHasTickets { .. } => {
-                Self::fixed(StatusCode::CONFLICT, "conflict", "epic still has tickets")
-            }
+            StoreError::EpicHasTickets { tickets } => Self::fixed(
+                StatusCode::CONFLICT,
+                "conflict",
+                crate::store::epic_has_tickets_message(tickets),
+            ),
             StoreError::Io(cause) => {
                 error!("store io error: {cause:?}");
                 Self::fixed(
@@ -361,6 +367,24 @@ mod tests {
             assert_eq!(api_error.status, status);
             assert_eq!(api_error.code, code);
         }
+    }
+
+    #[test]
+    fn epic_with_tickets_refusal_carries_the_ticket_count() {
+        let error = ApiError::from(StoreError::EpicHasTickets { tickets: 3 });
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "conflict");
+        assert_eq!(error.message, "epic has 3 tickets and cannot be deleted");
+    }
+
+    #[test]
+    fn epic_with_one_ticket_refusal_singularizes_the_noun() {
+        let error = ApiError::from(StoreError::EpicHasTickets { tickets: 1 });
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, "conflict");
+        assert_eq!(error.message, "epic has 1 ticket and cannot be deleted");
     }
 
     #[test]

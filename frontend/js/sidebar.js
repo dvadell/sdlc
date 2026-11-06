@@ -2,7 +2,7 @@
 
 import { state } from "./state.js";
 import { createDoc, deleteDoc, getTree, moveDoc, scaffold } from "./api.js";
-import { showError } from "./errors.js";
+import { showError, showResponseWarnings, showWarning, warningsToText } from "./errors.js";
 import { clearEditor } from "./editor.js";
 
 // The groups of the document tree in the order the sidebar renders them. Tickets
@@ -181,10 +181,33 @@ async function selectAfterMutation(path) {
   await loadDocument(path);
 }
 
+// Surfaces the feature-index refresh outcome of a successful mutation as a
+// warning, in its own guarded block, so an unexpected warning failure cannot abort
+// the already-successful mutation or skip its follow-up (ticket 0030).
+function surfaceResponseWarnings(response) {
+  try {
+    showResponseWarnings(response);
+  } catch (error) {
+    // The mutation already succeeded; a warning-rendering failure must not turn
+    // the completed create or rename into a failed request (ticket 0030, final
+    // closing review round).
+    console.error("Surfacing response warnings failed:", error);
+    try {
+      showWarning("The change succeeded, but its warning could not be displayed.");
+    } catch (fallbackError) {
+      console.error("Rendering the fallback warning failed:", fallbackError);
+    }
+  }
+}
+
 // Creates a document of one group through the prompt flow of the v1 actions.
 async function createFromGroup(group) {
   const kind = CREATABLE_GROUPS[group].kind;
-  const title = window.prompt(`New ${kind} title:`);
+  // Features and epics start with a `planned` status, so the prompt carries the
+  // short hint instead of the person discovering it in the file (ticket 0030).
+  const titlePrompt =
+    kind === "epic" || kind === "feature" ? `New ${kind} title (starts as planned):` : `New ${kind} title:`;
+  const title = window.prompt(titlePrompt);
   if (title === null) {
     return;
   }
@@ -219,6 +242,11 @@ async function createFromGroup(group) {
     if (typeof created?.path !== "string" || created.path.length === 0) {
       throw new Error("The server did not return a document path.");
     }
+    // The create itself succeeded; surface the feature-index refresh outcome
+    // as a warning instead of dropping it (ticket 0030). The warning is surfaced
+    // in its own guarded block, so an unexpected warning failure cannot abort the
+    // already-successful create or skip navigating to the new document.
+    surfaceResponseWarnings(created);
     await selectAfterMutation(created.path);
   } catch (error) {
     showError(error);
@@ -254,6 +282,11 @@ async function renameFromEntry(entry) {
     if (typeof moved?.path !== "string" || moved.path.length === 0) {
       throw new Error("The server did not return the renamed document path.");
     }
+    // The rename itself succeeded; surface the feature-index refresh outcome
+    // as a warning instead of dropping it (ticket 0030). The warning is surfaced
+    // in its own guarded block, so an unexpected warning failure cannot skip the
+    // follow-up document load or report the successful rename as a failure.
+    surfaceResponseWarnings(moved);
     await selectAfterMutation(moved.path);
   } catch (error) {
     showError(error);
@@ -271,11 +304,32 @@ async function deleteFromEntry(entry) {
 
   setActionsDisabled(true);
   try {
-    await deleteDoc(entry.path);
+    const response = await deleteDoc(entry.path);
     if (state.current?.path === entry.path) {
       // The open document is gone, so no stale content, hash or dirty state may
       // survive the deletion (ticket 0025).
       clearEditor();
+    }
+    if (entry.kind === "feature") {
+      // The delete outcome can be an orphan count and a feature-index refresh
+      // warning at once; the helper shows both in the single warning banner
+      // (ticket 0030). Surface the outcome before the follow-up tree refresh so
+      // a failed refresh cannot drop a notice that belongs to the delete itself;
+      // the warning is surfaced in its own guarded block, so an unexpected warning
+      // failure cannot skip the follow-up tree refresh after a successful delete.
+      try {
+        showFeatureOrphanWarning(response);
+      } catch (error) {
+        // The deletion already succeeded; a warning-rendering failure must not
+        // surface the completed delete as a failed request (ticket 0030, final
+        // closing review round).
+        console.error("Surfacing the delete outcome failed:", error);
+        try {
+          showWarning("The feature was deleted, but its notice could not be displayed.");
+        } catch (fallbackError) {
+          console.error("Rendering the fallback warning failed:", fallbackError);
+        }
+      }
     }
     await refreshTree();
   } catch (error) {
@@ -283,6 +337,76 @@ async function deleteFromEntry(entry) {
   } finally {
     setActionsDisabled(false);
   }
+}
+
+// The warning after a feature was deleted: the API counts the tickets that
+// still reference the feature and may refresh the feature index; the person is
+// told about the orphan without the tickets being rewritten or removed, and the
+// refresh outcome rides the same banner (ticket 0030).
+function showFeatureOrphanWarning(response) {
+  // The delete outcome can be an orphan count and a feature-index refresh
+  // warning at once; both belong to the same single warning banner, so they are
+  // combined instead of overwriting each other (ticket 0030).
+  const messages = [];
+  const orphaned = response?.orphaned_tickets;
+  if (typeof orphaned === "number" && orphaned > 0) {
+    messages.push(
+      orphaned === 1
+        ? "1 ticket still references the deleted feature."
+        : `${orphaned} tickets still reference the deleted feature.`,
+    );
+  }
+  const warningText = warningsToText(response?.warnings);
+  if (warningText) {
+    // The delete itself succeeded; surface the feature-index refresh outcome
+    // as a warning instead of dropping it (ticket 0030).
+    messages.push(warningText);
+  }
+  if (messages.length > 0) {
+    // The orphan refusal and the refresh outcome ride the same single warning
+    // banner, rendered through the shared coercion-and-render helper; the
+    // messages are already display strings, so the shared list coercion must not
+    // run them through `warningsToText` a second time.
+    showWarning(messages.join(" "));
+    return;
+  }
+  // The delete itself succeeded; when the outcome payload was not the expected
+  // shape the orphan and refresh notices are simply absent, so surface a generic
+  // notice instead of dropping the follow-up outcome silently (ticket 0030,
+  // final review round).
+  if (!isExpectedDeleteOutcome(response)) {
+    showWarning("The feature was deleted.");
+  }
+}
+
+// The delete outcome of a feature is expected to be an object carrying the
+// optional orphan count and the optional refresh warnings; any other payload
+// still means the delete succeeded, so the caller can tell it apart from a
+// failed or unexpected response.
+function isExpectedDeleteOutcome(response) {
+  // A missing delete body is not an expected outcome: the API refuses a 2xx
+  // response without a parseable body through the `invalid_response` error, so a
+  // bodyless success never reaches this guard, and treating it as expected would
+  // hide a malformed or empty payload behind the generic notice (ticket 0030,
+  // final closing review round).
+  if (response === null || response === undefined) {
+    return false;
+  }
+  if (typeof response !== "object" || Array.isArray(response)) {
+    return false;
+  }
+  const orphaned = response.orphaned_tickets;
+  // The orphan count is an optional field (`Option<usize>` serialized only when
+  // present), so an absent one is a valid outcome just like an explicit null; only
+  // a present but non-numeric value is unexpected.
+  if (orphaned !== null && orphaned !== undefined && typeof orphaned !== "number") {
+    return false;
+  }
+  const warnings = response.warnings;
+  if (warnings !== null && warnings !== undefined && !Array.isArray(warnings)) {
+    return false;
+  }
+  return true;
 }
 
 // The epic directory offered as the default target of a ticket creation.

@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0022", "0023", "0029"]
 ---
 
@@ -35,13 +35,13 @@ sidebar and PRD index follow, using the existing save path.
 
 ## Acceptance criteria
 
-- [ ] Selecting a status updates the front matter and saves.
-- [ ] The sidebar badge and PRD line update after a feature save.
-- [ ] An epic status change updates only the epic badge.
-- [ ] A feature or epic without front matter gains a valid block.
-- [ ] A failed save does not lie about the status.
-- [ ] Other document kinds show no status control.
-- [ ] Deleting a non-empty epic shows the refusal and ticket count; no ticket
+- [x] Selecting a status updates the front matter and saves.
+- [x] The sidebar badge and PRD line update after a feature save.
+- [x] An epic status change updates only the epic badge.
+- [x] A feature or epic without front matter gains a valid block.
+- [x] A failed save does not lie about the status.
+- [x] Other document kinds show no status control.
+- [x] Deleting a non-empty epic shows the refusal and ticket count; no ticket
   becomes unassigned.
 
 ## Tests

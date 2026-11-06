@@ -1,9 +1,11 @@
 //! The document editor: textarea, dirty state, save and preview (tickets 0023
-//! and 0024), plus the save conflict banner (ticket 0027).
+//! and 0024), plus the save conflict banner (ticket 0027) and the status control
+//! of features and epics (ticket 0030).
 
 import { state } from "./state.js";
 import { ApiError, getDoc, saveDoc } from "./api.js";
-import { showError } from "./errors.js";
+import { showError, showWarning, showWarnings } from "./errors.js";
+import { STATUS_OPTIONS, statusKindOf } from "./statuses.js";
 
 // The textarea of the selected document; null until a document is loaded.
 let textarea = null;
@@ -13,8 +15,17 @@ let saveButton = null;
 let previewButton = null;
 
 // The save button is disabled while a save is in flight; `save` ignores a second
-// submit on top of that.
-let saveInFlight = false;
+// submit on top of that. The in-flight saves are tracked per document path
+// together with the owner token of the operation that owns the entry, so a save
+// of another document may take the slot while a save of a different document is in
+// flight, and only the save that owns a path clears that path's entry
+// (ticket 0030, final review round).
+const saveInFlightOwners = new Map();
+// The owner token issued to every save operation; a save stores the token of its
+// entry and only clears the entry of a path in its `finally` while its token still
+// owns it, so a save that settles cannot clear the ownership of a newer save of the
+// same document (ticket 0030, final review round).
+let saveOwnerToken = 0;
 
 // Whether the rendered preview is shown instead of the source textarea
 // (ticket 0024).
@@ -26,6 +37,68 @@ let previewCaret = null;
 // The save conflict banner of the selected document (ticket 0027); null until a
 // document is loaded and rebuilt by `renderEditor`.
 let conflictBanner = null;
+
+// The refresh of the document tree after a save that can change a status
+// (ticket 0030); the sidebar owns the refresh implementation and hands it to the
+// editor through this hook, so this module keeps a single import direction and
+// never imports the sidebar module directly.
+let refreshTreeHandler = null;
+
+// Installs the tree refresh the sidebar owns; called once from the app bootstrap
+// so the editor asks the sidebar to refresh through the hook.
+export function setRefreshTree(handler) {
+  refreshTreeHandler = handler;
+}
+
+// The tree refresh after a save that can change a status; the sidebar owns the
+// refresh and installs it through the hook.
+function refreshTree() {
+  const handler = refreshTreeHandler;
+  if (handler) {
+    // The registration contract is a handler value, so a best-effort handler may
+    // return nothing or a non-Promise; coerce before attaching handlers, so a
+    // successful save is never turned into a TypeError by a bare `.catch` on a
+    // non-thenable (ticket 0030, final review round). The handler runs lazily
+    // inside the promise callback, so a handler that throws synchronously rejects
+    // the promise and the best-effort `.catch` below can absorb it instead of the
+    // exception escaping before any promise exists (ticket 0030, final review round).
+    return Promise.resolve().then(() => handler());
+  }
+  return Promise.resolve();
+}
+
+// The status select of the selected document; null until a document of a
+// status kind is loaded and rebuilt by `renderEditor`.
+let statusSelect = null;
+// The document's status as read from its content; the select restores to it
+// when a status save failed and the text stays dirty (ticket 0030). Null when
+// the document has no valid status yet; the select then shows the placeholder.
+let documentStatus = null;
+// Whether a status save is in flight; the select is disabled while it runs, so
+// a second change cannot stack a save on top of the first. While one is in
+// flight no new status save may start, whatever document it belongs to, so two
+// status saves of different documents cannot overlap and clobber each other
+// (ticket 0030, final review round). `statusSavingPath` records the document the
+// in-flight save belongs to, so a manual save of a different document is not
+// blocked by it.
+let statusSaving = false;
+// The path of the document the in-flight status save was started against; null
+// when no status save is in flight.
+let statusSavingPath = null;
+// The operation token of the status save that owns the in-flight state; a newer
+// status save supersedes an older one, and only the completing operation clears
+// the state when its token still matches (ticket 0030, fifth review round).
+let statusSaveToken = 0;
+
+// Clears the in-flight status save state, but only while the completing
+// operation is still the newest one; a stale operation settling after a newer
+// one cannot clear the newer slot (ticket 0030, final review round).
+function releaseStatusSlot(token) {
+  if (token === statusSaveToken) {
+    statusSaving = false;
+    statusSavingPath = null;
+  }
+}
 
 // The textarea normalizes line endings to `\n`; a document that was stored with
 // CRLF has to be converted back before it reaches the server, or every save
@@ -39,6 +112,27 @@ function toSavedContent(value, saved = state.current?.savedContent ?? "") {
 
 function normalizeNewlines(value) {
   return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+// Splits `text` into lines that keep their own line terminator, so a rewrite
+// that touches only the status line can rebuild the document without normalizing
+// the line endings of the untouched lines. Only `\r\n` and `\n` are line
+// endings; a lone `\r` is content, exactly like the server's splitter, which
+// splits on `\n` and strips one trailing `\r` of a CRLF pair.
+function splitLines(text) {
+  const lines = [];
+  const parts = text.split(/(\r\n|\n)/);
+  const endsWithEol = /(?:\r\n|\n)$/.test(text);
+  for (let index = 0; index + 1 < parts.length; index += 2) {
+    lines.push({ value: parts[index], eol: parts[index + 1] });
+  }
+  if (!endsWithEol) {
+    const last = parts.length - 1;
+    if (last % 2 === 0) {
+      lines.push({ value: parts[last], eol: "" });
+    }
+  }
+  return lines;
 }
 
 // The dirty state is the textarea value against the content the document was
@@ -75,6 +169,387 @@ function librariesReady() {
   );
 }
 
+// The front matter status key line: an optional indentation, the `status` key,
+// the value and nothing else. The key may be indented with spaces like any other
+// YAML mapping key (YAML forbids tab indentation, so only spaces are accepted,
+// exactly like the server's YAML parser), and the value may carry a trailing
+// comment that the YAML parser treats as not part of the value, so both shapes
+// are accepted here exactly like the server's YAML parser does; whether an
+// indented key is the top-level status of the block is decided by its
+// indentation against the block's root indentation (ticket 0030, final review
+// round).
+const STATUS_LINE = /^([ ]*)status:(?:[ \t]+(.*))?$/;
+
+// A front matter mapping key line: an optional indentation, the key and the
+// key's colon, so the root indentation of a block is discovered from its first
+// key line whatever key the server's YAML parser accepts; YAML permits arbitrary
+// mapping keys, not only keys that start with a letter or underscore, so the
+// discovery must not narrow the key start (ticket 0030, final review round).
+const KEY_LINE = /^([ ]*)(?:"[^"]*"|'[^']*'|[^\s:#][^:]*)?:/;
+
+// The YAML scalar of a status line: a trailing comment (`status: planned # note`)
+// is not part of the value, so it is stripped before the value is unquoted and
+// validated, just like the server's YAML parser does; a `#` starts a comment when
+// it begins the scalar or follows a space or a tab, and not inside a quoted
+// scalar.
+function stripYamlComment(value) {
+  let quote = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote) {
+      // An escaped character inside a quoted scalar (for example `\"`) is not the
+      // end of the scalar, so the character after the backslash is skipped and
+      // cannot close the quote or start a comment (ticket 0030, final review round).
+      if (char === "\\") {
+        index += 1;
+      } else if (char === quote) {
+        quote = null;
+      }
+    } else if (char === "#" && (index === 0 || value[index - 1] === " " || value[index - 1] === "\t")) {
+      return value.slice(0, index);
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    }
+  }
+  return value;
+}
+
+// The root indentation of a front matter block: the indentation of its first
+// key line, so a block whose root keys are indented (`  status: planned`) still
+// has a top-level status while a key indented under an earlier key stays nested
+// (ticket 0030, final review round). Shared by the read and rewrite paths so a
+// fix in one cannot leave the other discovering a different root indentation.
+function rootIndentOf(lines, from, to) {
+  for (let index = from; index < to; index += 1) {
+    const keyLine = KEY_LINE.exec(lines[index].value);
+    if (keyLine) {
+      return keyLine[1];
+    }
+  }
+  return null;
+}
+
+// The front matter status of a document, or null when the block is absent or
+// carries no valid status; `allowed` is the status vocabulary of the kind
+// (ticket 0030).
+export function readStatus(content, allowed) {
+  const text = String(content ?? "").replace(/^\uFEFF/, "");
+  const lines = splitLines(text);
+  if (!lines.length || lines[0].value !== "---" || lines[0].eol === "") {
+    // No front matter block, so there is no status to read; the opening
+    // delimiter must be a line of its own with a line terminator after it, like
+    // the server's splitter requires, so a bare `---` is body text.
+    return null;
+  }
+  let status = null;
+  // The number of status keys at the block's root indentation; a block carrying
+  // more than one of them is ambiguous, exactly like a YAML mapping with two
+  // status keys, which the server reads as carrying no status at all.
+  let statusCount = 0;
+  // The closing delimiter ends the front matter block; a later `status:` line
+  // would be body text, not front matter, so the root indentation is discovered
+  // only over the block's own key lines (ticket 0030, final review round). The
+  // delimiter is only real when followed by a line terminator, like the server's
+  // splitter requires, so a closing delimiter that ends the text without one
+  // leaves the block absent.
+  let closing = -1;
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.value === "---") {
+      if (line.eol === "") {
+        // The block never closes, so there is no front matter to read.
+        return null;
+      }
+      closing = index;
+      break;
+    }
+  }
+  if (closing === -1) {
+    // An unterminated block is treated as absent, like the server does.
+    return null;
+  }
+  // The root indentation of the block: the indentation of its first key line, so
+  // a block whose root keys are indented (`  status: planned`) still has a
+  // top-level status while a key indented under an earlier key stays nested
+  // (ticket 0030, final review round). The first key may start with any character
+  // a YAML key may start with, so the discovery agrees with the server's YAML
+  // parser for any mapping of the block; the scan stops at the closing delimiter
+  // so body content is never mistaken for front matter (ticket 0030, final review
+  // round).
+  const rootIndent = rootIndentOf(lines, 1, closing);
+  for (let index = 1; index < closing; index += 1) {
+    const line = lines[index];
+    const match = STATUS_LINE.exec(line.value);
+    const indent = /^[ ]*/.exec(line.value)[0];
+    if (match && indent === rootIndent) {
+      // Only a status key at the block's root indentation is the top-level
+      // status; a key indented under an earlier key is a nested mapping key, not
+      // the status of the block, and cannot conflict with it.
+      statusCount += 1;
+      if (statusCount > 1) {
+        // A YAML mapping with two status keys is invalid, so the server reads no
+        // status from the block; the client must not pick one either.
+        return null;
+      }
+      const raw = (match[2] ?? "").trim();
+      // A trailing comment is not part of the YAML value, so strip it before the
+      // value is unquoted and validated; the server reads
+      // `status: planned # note` as the status `planned`.
+      const scalar = stripYamlComment(raw).trim();
+      // YAML removes one balanced pair of surrounding quotes and nothing else,
+      // so a quoted status is only a status when the quotes are a balanced pair.
+      const value = /^(['"])(.*)\1$/.test(scalar) ? scalar.slice(1, -1) : scalar;
+      status = allowed.includes(value) ? value : null;
+    }
+  }
+  return status;
+}
+
+// The status value as a valid YAML scalar for the `status:` line: the helper is
+// exported and therefore takes arbitrary or multi-line input, so the value is
+// escaped before it is interpolated into the line, and a value that cannot stay a
+// single-line plain scalar is quoted as a double-quoted YAML scalar (ticket
+// 0030, final review round).
+function statusYamlValue(status) {
+  const value = String(status ?? "");
+  // A plain single-line kebab slug is a valid YAML plain scalar and is
+  // interpolated without quoting; anything else is written as a double-quoted
+  // YAML scalar, escaping the value exactly once, so quoted or multi-line input
+  // cannot desync or double-escape (ticket 0030, final review round).
+  if (/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
+// The document content with its front matter status set to `status`, replacing
+// the one status line or inserting a block when the document has none
+// (ticket 0030). Everything outside the status line is preserved, and a newly
+// created block carries the same single blank line the server's generated
+// templates use. The helper takes the status of the kind vocabulary contract, a
+// single-line lowercase kebab-case slug; the value is quoted or escaped before it
+// is written, so arbitrary or multi-line input cannot emit malformed YAML
+// (ticket 0030, final review round).
+export function withStatus(content, status) {
+  const bom = String(content ?? "").startsWith("\uFEFF") ? "\uFEFF" : "";
+  const text = String(content ?? "").replace(/^\uFEFF/, "");
+  const lines = splitLines(text);
+  let closing = -1;
+  if (lines[0] && lines[0].value === "---" && lines[0].eol !== "") {
+    for (let index = 1; index < lines.length; index += 1) {
+      if (lines[index].value === "---" && lines[index].eol !== "") {
+        closing = index;
+        break;
+      }
+    }
+  }
+  if (closing === -1) {
+    // No front matter block: prepend a valid one before the body, with the same
+    // single blank line the server's generated templates use and no extra one.
+    const firstBreak = /(?:\r\n|\n)/.exec(text);
+    const eol = firstBreak ? firstBreak[0] : "\n";
+    const block = [`---`, `status: ${statusYamlValue(status)}`, `---`].join(eol) + eol;
+    const separator = eol;
+    // The body is preserved verbatim after the separating blank line; stripping
+    // the leading whitespace here would drop a body that legitimately begins with
+    // indentation or blank lines.
+    return `${bom}${block}${separator}${text}`;
+  }
+
+  const updated = [...lines];
+  let statusIndex = -1;
+  let statusEol = updated[closing].eol || "\n";
+  // The root indentation of the block: the indentation of its first key line, so
+  // only a status key at that level is the top-level status the writer may
+  // replace; one nested under another key is that key's subfield and is left
+  // alone (ticket 0030, final review round). The first key may start with any
+  // character a YAML key may start with, so the discovery agrees with the
+  // server's YAML parser for any mapping of the block, exactly like the read path.
+  const rootIndent = rootIndentOf(updated, 1, closing);
+  // Fall back to the root indentation of the block's other keys when it carried
+  // no top-level status, and keep the indentation of the replaced status key, so
+  // the rewrite neither drops a nested status key nor reformats a key the person
+  // indented by hand.
+  let statusIndent = rootIndent ?? "";
+  for (let index = 1; index < closing; index += 1) {
+    const statusMatch = STATUS_LINE.exec(updated[index].value);
+    if (statusMatch && statusMatch[1] === rootIndent) {
+      statusIndex = index;
+      statusEol = updated[index].eol || "\n";
+      statusIndent = statusMatch[1];
+      break;
+    }
+  }
+  // Drop every top-level status key of the block and insert a single fresh status
+  // line in its place (or before the closing marker when the block carried none),
+  // so a block that held duplicates is rewritten with one valid status key again;
+  // a duplicate key would be invalid YAML that reads back as no status at all
+  // (ticket 0030, sixth review round).
+  const block = [];
+  for (let index = 0; index < updated.length; index += 1) {
+    if (index === 0 || index === closing) {
+      block.push(updated[index]);
+      continue;
+    }
+    const statusMatch = STATUS_LINE.exec(updated[index].value);
+    const isTopLevelStatus = statusMatch !== null && statusMatch[1] === rootIndent;
+    if (index < closing && isTopLevelStatus) {
+      // Only front matter status keys at the block's root indentation are the
+      // top-level status; a nested one is another key's subfield and must survive,
+      // and a `status:` line after the closing delimiter belongs to the body and
+      // must survive.
+      continue;
+    }
+    block.push(updated[index]);
+  }
+  // Keep the indentation of the replaced status key, when there was one, so
+  // the rewrite does not reformat a key the person indented by hand.
+  block.splice(
+    statusIndex === -1 ? closing : statusIndex,
+    0,
+    { value: `${statusIndent}status: ${statusYamlValue(status)}`, eol: statusEol },
+  );
+  return `${bom}${block.map((line) => line.value + line.eol).join("")}`;
+}
+
+// Restores the captured status select to the captured document status; shared by
+// every status-change outcome that gives the select back, so none of the branches
+// can drift between them (ticket 0030, final review round).
+function restoreStatusSelect(select, status) {
+  if (select?.isConnected) {
+    select.value = status ?? "";
+  }
+}
+
+// Applies a status picked in the editor toolbar: it edits the front matter of
+// the textarea content (adding a block when absent), marks the document dirty
+// and saves through the normal save path (ticket 0030).
+export async function changeStatus(status) {
+  // Capture the document at entry: the change event already identifies the
+  // document through the selected path, so derive the vocabulary from it
+  // instead of one captured before a possible concurrent render.
+  const changedPath = state.current?.path;
+  const options = STATUS_OPTIONS[statusKindOf(changedPath)] ?? null;
+  // Capture the select at entry: a document switch while the save is in flight
+  // rebuilds the editor and replaces the module state, so the body must not
+  // keep reaching for the (possibly stale or detached) global select or write
+  // the status of another document.
+  const thisStatusSelect = statusSelect;
+  const thisDocumentStatus = documentStatus;
+  // Capture the save button and the textarea at entry too: a document switch
+  // while the save is in flight rebuilds the editor and replaces the module
+  // state, so the disable/enable and the content paths must not reach for the
+  // (possibly stale or detached) globals.
+  const thisSaveButton = saveButton;
+  const thisTextarea = textarea;
+  if (status === "") {
+    // The "No status" option is outside the vocabulary and never saved; give
+    // the select back to the document status instead of leaving it stuck there.
+    restoreStatusSelect(thisStatusSelect, thisDocumentStatus);
+    return;
+  }
+  if (
+    thisStatusSelect === null ||
+    !options ||
+    !options.includes(status) ||
+    statusSaving ||
+    saveInFlightOwners.has(changedPath)
+  ) {
+    // A locked or invalid pick leaves the select sitting on the value the person
+    // just chose instead of the persisted status; give it back before bailing.
+    restoreStatusSelect(thisStatusSelect, thisDocumentStatus);
+    return;
+  }
+  if (!changedPath || !isSelected(changedPath)) {
+    // The person moved to another document while this change was handled; do
+    // not write the status of a document that is no longer the selected one, and
+    // give the captured select back to the captured document status instead of
+    // leaving it stuck on the value the person just picked.
+    restoreStatusSelect(thisStatusSelect, thisDocumentStatus);
+    return;
+  }
+  statusSaving = true;
+  statusSavingPath = changedPath;
+  statusSaveToken += 1;
+  const statusSaveId = statusSaveToken;
+  if (thisStatusSelect?.isConnected) {
+    thisStatusSelect.disabled = true;
+  }
+  if (thisSaveButton?.isConnected) {
+    // A manual save must not race the status save that owns the write; the nodes
+    // are guarded because a document switch replaces and detaches them while the
+    // promise is outstanding.
+    thisSaveButton.disabled = true;
+  }
+  try {
+    const content = withStatus(
+      thisTextarea?.isConnected ? thisTextarea.value : (state.current?.content ?? ""),
+      status,
+    );
+    if (thisTextarea?.isConnected) {
+      thisTextarea.value = content;
+    }
+    if (isSelected(changedPath)) {
+      // The status change belongs to the document that was selected; the writes
+      // below must not land on a document that becomes selected while the save is
+      // in flight (ticket 0030, sixth review round).
+      state.current.content = content;
+      state.dirty = isDirty();
+      renderDirtyIndicator();
+    }
+    if (!isSelected(changedPath)) {
+      // The person switched documents while the status change was applied; the
+      // status change belonged to the document that was selected, so do not save
+      // it on behalf of whatever document is selected now.
+      return;
+    }
+    const saveResult = await save({ allowDuringStatusSave: true });
+    if (!isSelected(changedPath)) {
+      // The person switched documents while the save was in flight; the status
+      // change belonged to the document that was selected, so leave the newly
+      // selected document alone.
+      return;
+    }
+    if (saveResult?.skipped) {
+      // The save did not persist (for example on a conflict, which resolves
+      // without throwing); the disk keeps the old status, so give the select
+      // back and leave the local text dirty for the person to retry.
+      restoreStatusSelect(thisStatusSelect, thisDocumentStatus);
+      return;
+    }
+    // The save completed through the normal save path, which adopted the saved
+    // content and cleared the dirty flag itself; adopt the picked status without
+    // re-reading the dirty flag, which a typing edit during the in-flight save
+    // would otherwise mistake for a failed save. Write through the select
+    // captured at entry, so a document switch that rebuilt the editor while the
+    // save was in flight cannot leave the module state pointing at another
+    // document's control.
+    documentStatus = status;
+    if (thisStatusSelect?.isConnected) {
+      thisStatusSelect.value = status;
+    }
+  } catch (error) {
+    // The save failed, so the document on disk keeps its status; give the
+    // select back and leave the local text dirty for the person to retry.
+    restoreStatusSelect(thisStatusSelect, thisDocumentStatus);
+    showError(error);
+  } finally {
+    // Only the operation that is still the newest clears the in-flight state
+    // and releases the controls, so an older operation settling after a newer
+    // one cannot clobber the newer in-flight state or re-enable the controls
+    // the newer operation disabled.
+    if (statusSaveToken === statusSaveId) {
+      releaseStatusSlot(statusSaveId);
+      if (thisStatusSelect?.isConnected) {
+        thisStatusSelect.disabled = false;
+      }
+      if (thisSaveButton?.isConnected) {
+        thisSaveButton.disabled = false;
+      }
+    }
+  }
+}
+
 // Replaces the editor area with the save toolbar and the textarea.
 export function renderEditor() {
   const element = document.querySelector("#editor");
@@ -83,12 +558,22 @@ export function renderEditor() {
     saveButton = null;
     previewButton = null;
     conflictBanner = null;
+    statusSelect = null;
+    documentStatus = null;
+    // The in-flight saves track their own entries per document path, so a
+    // teardown with no #editor element must not erase an in-flight save that
+    // belongs to another document; the save that owns a path clears its own
+    // entry in its `finally`.
     return;
   }
 
   element.replaceChildren();
   previewVisible = false;
   previewCaret = null;
+  // The editor is being rebuilt for another document (or for none); a save may
+  // still be in flight from the previous one, and its own `finally` clears its
+  // own entry once the awaited request settles, so a rebuild must not reset it
+  // here.
 
   // The conflict banner lives inside the editor area so it can sit above the
   // toolbar while the person keeps typing (ticket 0027); it is rebuilt on every
@@ -120,6 +605,39 @@ export function renderEditor() {
     togglePreview();
   });
   toolbar.appendChild(previewButton);
+
+  // The status select of the selected document lives in the editor toolbar
+  // only for features and epics, with the status vocabulary of the kind; every
+  // other kind gets no control (ticket 0030).
+  const kind = statusKindOf(state.current?.path);
+  if (kind && STATUS_OPTIONS[kind]) {
+    const select = document.createElement("select");
+    select.id = "document-status";
+    select.className = "document-status";
+    // The control is a plain select, so the accessible name cannot come from a
+    // wrapping label; set it directly (ticket 0030, fourth review round).
+    select.setAttribute("aria-label", "Document status");
+    const noStatus = document.createElement("option");
+    noStatus.value = "";
+    noStatus.textContent = "No status";
+    select.appendChild(noStatus);
+    for (const value of STATUS_OPTIONS[kind]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = value;
+      select.appendChild(option);
+    }
+    documentStatus = readStatus(state.current?.content ?? "", STATUS_OPTIONS[kind]);
+    select.value = documentStatus ?? "";
+    statusSelect = select;
+    select.addEventListener("change", () => {
+      void changeStatus(select.value);
+    });
+    toolbar.appendChild(select);
+  } else {
+    statusSelect = null;
+    documentStatus = null;
+  }
 
   textarea = document.createElement("textarea");
   textarea.id = "document-content";
@@ -195,12 +713,12 @@ function showConflictBanner() {
 
 // Hides the save conflict banner after a choice was applied or the conflict was
 // resolved another way.
-function hideConflictBanner() {
-  if (!conflictBanner) {
+function hideConflictBanner(bannerToHide = conflictBanner) {
+  if (!bannerToHide) {
     return;
   }
-  conflictBanner.hidden = true;
-  conflictBanner.setAttribute("aria-hidden", "true");
+  bannerToHide.hidden = true;
+  bannerToHide.setAttribute("aria-hidden", "true");
 }
 
 // Whether the document a save or conflict action ran against is still the
@@ -331,21 +849,61 @@ async function overwriteWithMine() {
   if (!path) {
     return;
   }
-  hideConflictBanner();
-  const localText = textarea ? textarea.value : (state.current?.content ?? "");
+  // Capture the banner at entry: a document switch while the overwrite is in
+  // flight rebuilds the editor and replaces the global banner, so the `finally`
+  // must hide the banner of the overwritten document and not the one that the
+  // newly selected document renders afterwards.
+  const banner = conflictBanner;
+  if (!isSelected(path)) {
+    renderDirtyIndicator();
+    return;
+  }
+  const localText = textarea?.isConnected ? textarea.value : (state.current?.content ?? "");
   const savedContent = state.current?.savedContent ?? "";
+  // Whether the overwrite just reported a conflict; a conflict re-shows the
+  // banner in the `catch` below, so the `finally` must not hide it again.
+  let conflict = false;
+  // The owner token of this overwrite's in-flight slot; the slot is only cleared
+  // while this overwrite still owns it, so a stale overwrite settling cannot clear
+  // the ownership of a newer overwrite of the same document (ticket 0030, final
+  // review round).
+  let overwriteToken = null;
+  // The overwrite is a write of the selected document, so it takes the same
+  // in-flight slot the ordinary save path owns; only the operation that owns a
+  // path clears that path's entry (ticket 0030, final review round). The conflict
+  // banner is hidden only once the overwrite may proceed, so an overwrite that
+  // bails on an in-flight save keeps the conflict choice available (ticket 0030,
+  // final closing review round).
+  if (saveInFlightOwners.has(path) || (statusSaving && statusSavingPath === path)) {
+    // A save or status save of this document is already in flight, so the
+    // overwrite must not overlap it on the document contents or the precondition
+    // hash; the in-flight operation owns the write from here on, and the conflict
+    // banner stays visible for the person to choose again once it settles.
+    return;
+  }
+  hideConflictBanner(banner);
   try {
     if (!isSelected(path)) {
       renderDirtyIndicator();
       return;
     }
-    const document = await getDoc(path);
+    // The overwrite is a write of the selected document, so it takes the same
+    // in-flight slot the ordinary save path owns; only the operation that owns a
+    // path clears that path's entry (ticket 0030, final review round).
+    overwriteToken = ++saveOwnerToken;
+    saveInFlightOwners.set(path, overwriteToken);
+    const freshDocument = await getDoc(path);
     if (!isSelected(path)) {
       renderDirtyIndicator();
       return;
     }
     const content = toSavedContent(localText, savedContent);
-    const response = await saveDoc(path, content, document.hash);
+    const response = await saveDoc(path, content, freshDocument.hash);
+    // The overwrite itself succeeded, so refresh the status outcome before any
+    // document-switch guard: the helper starts the tree refresh and then re-checks
+    // whether the saved document is still the selected one, so a save that lands
+    // after the person switched documents still refreshes the written document.
+    refreshStatusAfterSave(path, content, response);
     if (!isSelected(path)) {
       renderDirtyIndicator();
       return;
@@ -355,16 +913,38 @@ async function overwriteWithMine() {
     state.current.content = localText;
     state.dirty = isDirty();
     renderDirtyIndicator();
-    hideConflictBanner();
+    if (!isSelected(path)) {
+      // The person switched documents while the overwrite was applied; the
+      // overwrite belonged to the document that was selected, so leave the newly
+      // selected document alone instead of warning, refreshing the tree or
+      // syncing the status of the document that is no longer selected.
+      return;
+    }
   } catch (error) {
     if (error instanceof ApiError && error.code === "conflict") {
       // The disk changed again while overwriting; report the conflict and stop.
+      conflict = true;
       if (state.current?.path === path) {
         showConflictBanner();
       }
       return;
     }
     showError(error);
+  } finally {
+    // Release the in-flight slot this overwrite owns, so a later save or status
+    // save of the same document may start once it settles; only the operation that
+    // still owns the slot clears it, so a stale overwrite settling cannot clear the
+    // ownership of a newer overwrite of the same document.
+    if (overwriteToken !== null && saveInFlightOwners.get(path) === overwriteToken) {
+      saveInFlightOwners.delete(path);
+    }
+    // Hide the conflict banner once the overwrite settled, whichever way the
+    // flow stopped; a conflict re-shows it in the `catch` above and keeps it
+    // visible through the flag, and an overwrite that completes after the person
+    // switched documents settles here instead of returning before the refresh.
+    if (!conflict) {
+      hideConflictBanner(banner);
+    }
   }
 }
 
@@ -379,74 +959,179 @@ export async function loadDocument(path) {
     }
   }
 
-  const document = await getDoc(path);
+  const freshDocument = await getDoc(path);
   state.current.path = path;
-  state.current.content = normalizeNewlines(document.content);
-  state.current.savedContent = document.content;
-  state.current.hash = document.hash;
+  state.current.content = normalizeNewlines(freshDocument.content);
+  state.current.savedContent = freshDocument.content;
+  state.current.hash = freshDocument.hash;
   state.dirty = false;
 
   renderEditor();
   if (!textarea) {
     throw new Error("The editor is unavailable.");
   }
-  textarea.value = document.content;
+  textarea.value = freshDocument.content;
   textarea.focus();
   renderDirtyIndicator();
 }
 
+// After a successful save: surface the feature-index refresh outcome as
+// warnings and, for a feature or epic whose status the save may have changed,
+// refresh the document tree and re-read the saved status to sync the status
+// select (ticket 0030). The person may have switched documents while the save
+// was in flight, and a status save may itself be applying the result, so the
+// helper bails before writing state that no longer belongs to the selected
+// document; it returns whether the saved document is still the selected one.
+// Shared by the ordinary save path and the overwrite-with-mine conflict
+// resolution so the two cannot drift.
+function refreshStatusAfterSave(path, savedContent, response) {
+  const savedKind = statusKindOf(path);
+  const hasStatus = Boolean(savedKind && STATUS_OPTIONS[savedKind]);
+  if (hasStatus) {
+    // The saved document is a feature or an epic, so its sidebar badge may have
+    // changed and the PRD feature index was refreshed by the server during the
+    // save (ticket 0029); refresh the tree for those saves alone. The refresh is
+    // best effort and must not turn a successful save into a reported failure, so
+    // a failure surfaces as a warning while the save itself stays successful.
+    refreshTree().catch((error) => {
+      showWarning(`The document changed on disk during the refresh: ${error?.message ?? error}`);
+    });
+  }
+  if (!isSelected(path)) {
+    // The person switched documents while the save was in flight; the saved
+    // content belongs to the document that was selected, so re-check before
+    // surfacing the outcome or writing its status, whatever the saved document's
+    // kind; the tree refresh of the saved document still stands.
+    return false;
+  }
+  // The server refreshes the PRD feature index after a feature save and
+  // reports the outcome as warnings; the save itself succeeded, so surface the
+  // refresh outcome here instead of dropping it in one save path only. The
+  // outcome is surfaced only once the saved document is still the selected one,
+  // the way the save path does, so a document switch cannot surface a warning of
+  // a document that is no longer selected.
+  showWarnings(response?.warnings);
+  if (!hasStatus) {
+    // Only features and epics carry a status the sidebar badge or the select
+    // can reflect; every other kind completes without a status refresh.
+    return true;
+  }
+  // The save can come from a status change or from a manual edit of the status
+  // line; either way the saved content carries the new truth, so refresh the
+  // read status and sync the select unless the status change itself is applying
+  // the result (ticket 0030).
+  documentStatus = readStatus(savedContent, STATUS_OPTIONS[savedKind]);
+  if (!(statusSaving && statusSavingPath === path) && statusSelect?.isConnected) {
+    statusSelect.value = documentStatus ?? "";
+  }
+  return true;
+}
+
 // Saves the textarea content of the selected document. No-op when the document
-// is clean or a save is already in flight; the stored hash is only trusted from
-// the server response, never from an optimistic update.
-export async function save() {
+// is clean, when a save of the same document is already in flight, or when a
+// status save is in flight and this call is not the status save itself
+// (`allowDuringStatusSave`); the stored hash is only trusted from the server
+// response, never from an optimistic update. A skipped save resolves with
+// `{ skipped: true }` so the ordinary callers (toolbar button, Ctrl/Cmd+S
+// shortcut) can tell a no-op save from a completed one instead of silently
+// dropping it; a completed save resolves with `{ skipped: false }` so callers can
+// tell the two apart. In-flight saves are tracked per document path, so only a
+// save of a document that already has one in flight is skipped.
+export async function save({ allowDuringStatusSave = false } = {}) {
   const path = state.current?.path;
-  if (saveInFlight || !path || !isDirty()) {
-    return Promise.resolve();
+  if (
+    (!allowDuringStatusSave && statusSaving && statusSavingPath === path) ||
+    // The in-flight saves are tracked per document path, so a save of another
+    // document may run while a save of a different document is in flight instead
+    // of being skipped behind that save's ownership; a save is skipped only while
+    // its own document still has one in flight.
+    saveInFlightOwners.has(path) ||
+    !path ||
+    !isDirty()
+  ) {
+    return { skipped: true };
   }
 
-  saveInFlight = true;
+  const saveToken = ++saveOwnerToken;
+  saveInFlightOwners.set(path, saveToken);
   const thisSaveButton = saveButton;
-  if (thisSaveButton) {
+  const thisTextarea = textarea;
+  if (thisSaveButton && !allowDuringStatusSave) {
+    // When this save drives a status change (`allowDuringStatusSave`) the
+    // surrounding `changeStatus` operation owns the save-button lifecycle, so
+    // the save itself must not toggle the button.
     thisSaveButton.disabled = true;
   }
+  // Capture the content, the saved content and the precondition hash of the
+  // document at entry: a document switch while the save is in flight replaces
+  // `state.current`, so reading them once the request is issued could adopt
+  // another document's text, saved content or hash and turn a successful write
+  // into a conflict or save the wrong content (ticket 0030, final review round).
+  const content = state.current?.content ?? "";
+  const savedContent = state.current?.savedContent ?? "";
+  const hash = state.current?.hash;
   try {
     if (!isSelected(path)) {
       // The person switched documents before the save was started; do not issue
       // a request on behalf of the now-deselected document.
       renderDirtyIndicator();
-      return;
+      return { skipped: true };
     }
-    const content = toSavedContent(textarea ? textarea.value : (state.current?.content ?? ""));
-    const response = await saveDoc(path, content, state.current?.hash);
-    if (!isSelected(path)) {
+    const text = thisTextarea?.isConnected ? thisTextarea.value : content;
+    const contentToSave = toSavedContent(text, savedContent);
+    const response = await saveDoc(path, contentToSave, hash);
+    // Route the saved response through the shared outcome helper before the
+    // document-switch guard, so both save paths share one outcome handling (ticket
+    // 0030, final review round): a save that resolved just as the person switched
+    // documents still refreshes the written document's tree and applies the same
+    // consistency rules instead of dropping both.
+    if (!refreshStatusAfterSave(path, contentToSave, response)) {
       // The person switched documents while the save was in flight; the response
-      // belongs to the old path and must not be applied to the new selection.
+      // belongs to the old path and must not be applied to the new selection, so
+      // bail out before capturing or writing any of the saved state.
       renderDirtyIndicator();
-      return;
+      return { skipped: true };
     }
-    state.current.hash = response.hash;
-    state.current.savedContent = content;
-    state.current.content = textarea ? textarea.value : (state.current.content ?? "");
+    // Capture the state that belongs to the saved document before applying it,
+    // so a response that resolves just as the person switches documents cannot
+    // land on the newly selected document instead (ticket 0030, sixth review).
+    const savedHash = response.hash;
+    const savedText = thisTextarea?.isConnected ? thisTextarea.value : content;
+    state.current.hash = savedHash;
+    state.current.savedContent = contentToSave;
+    state.current.content = savedText;
     state.dirty = isDirty();
     renderDirtyIndicator();
+    return { skipped: false };
   } catch (error) {
     // Keep the text and the dirty state; the conflict banner offers the choices,
     // every other failure falls through to the error banner. Only mark the
     // current document dirty when this save still belonged to it.
     if (state.current?.path === path) {
       state.dirty = true;
+      renderDirtyIndicator();
     }
     if (error instanceof ApiError && error.code === "conflict") {
       // The disk moved under the local text; keep it and let the person choose.
       if (state.current?.path === path) {
         showConflictBanner();
       }
-      return;
+      return { skipped: true };
     }
     throw error;
   } finally {
-    saveInFlight = false;
-    if (thisSaveButton) {
+    // Only the save that owns the path clears its own entry, so a save that
+    // settles cannot clear the ownership of a newer save of the same document
+    // that started before the older one settled, and saves of other documents
+    // keep their own entries.
+    if (saveInFlightOwners.get(path) === saveToken) {
+      saveInFlightOwners.delete(path);
+    }
+    if (!allowDuringStatusSave && thisSaveButton) {
+      // When this save drives a status change (`allowDuringStatusSave`) the
+      // surrounding `changeStatus` operation owns the save-button lifecycle and
+      // re-enables the button when its own turn settles; releasing it here would
+      // be earlier than that.
       thisSaveButton.disabled = false;
     }
   }
@@ -460,7 +1145,13 @@ export function clearEditor() {
   state.current.savedContent = "";
   state.current.hash = null;
   state.dirty = false;
-  saveInFlight = false;
+  // The editor state is being torn down, so no save may stay blocked behind it;
+  // the save that owns the write still clears its own in-flight entry in its
+  // `finally`, and only the save or status save that belongs to the deleted
+  // document has to be released by its own settling; leave the in-flight ownership
+  // of a deleted document in place until the pending operation settles, so a new
+  // operation cannot start against that path before the stale one releases it
+  // through its token guard (ticket 0030, final closing review round).
   renderEditor();
   renderDirtyIndicator();
 }

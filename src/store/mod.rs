@@ -77,7 +77,7 @@ pub enum StoreError {
     },
 
     /// The epic directory still holds tickets, so it cannot be deleted yet.
-    #[error("epic has {tickets} tickets and cannot be deleted")]
+    #[error("{}", epic_has_tickets_message(*tickets))]
     EpicHasTickets {
         /// The number of tickets that would move with the epic.
         tickets: usize,
@@ -830,6 +830,18 @@ fn orphaned_tickets(root: &Path, feature: &str) -> usize {
         }
     }
     orphaned
+}
+
+/// The refusal of an epic that still holds tickets, singular for a single
+/// ticket and plural otherwise, so the message never renders a bare "1 tickets"
+/// (ticket 0030, final review round); the store display and the API error share
+/// this one helper so their wording cannot drift apart.
+pub(crate) fn epic_has_tickets_message(tickets: usize) -> String {
+    if tickets == 1 {
+        "epic has 1 ticket and cannot be deleted".to_string()
+    } else {
+        format!("epic has {tickets} tickets and cannot be deleted")
+    }
 }
 
 /// Runs the atomic check-and-write sequence under the caller's write lock:

@@ -33,7 +33,7 @@ body {
 /* The error banner floats over the top of the layout; when it is revealed,
    reserve room for it via a custom property so the pushed-down header stays
    readable and the reserved space tracks the banner. */
-#app.error-banner-open {
+#app.banner-open {
   padding-top: var(--error-banner-reserve);
 }
 
@@ -261,6 +261,28 @@ body {
   border-color: #9db9e0;
 }
 
+/* The status select of the editor toolbar, shown for features and epics only
+   (ticket 0030); the option set is the status vocabulary of the kind.
+   Disabled while a status save is in flight. */
+#document-status {
+  padding: 0.2rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+
+#document-status:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+#document-status:focus-visible {
+  outline: 2px solid #8bb0e8;
+  outline-offset: 2px;
+}
+
 /* The rendered preview of the markdown source, shown instead of the textarea
    while the preview toggle is on (ticket 0024). */
 #preview {
@@ -426,6 +448,14 @@ body {
   color: #8c1f1f;
   border-bottom: 1px solid #f3c1c1;
   font-size: 0.9rem;
+}
+
+/* The warning variant of the banner: same surface, calmer palette, for outcomes
+   the person should know about without the request having failed. */
+.error-banner.warning {
+  background: #fdf6e3;
+  color: #6b5310;
+  border-bottom: 1px solid #ecd9a0;
 }
 
 .error-banner button {

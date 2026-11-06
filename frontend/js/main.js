@@ -4,8 +4,9 @@ import {
   renderSidebar,
   setEditorLoadDocument,
   starterNeedsScaffolding,
+  refreshTree,
 } from "./sidebar.js";
-import { loadDocument, save } from "./editor.js";
+import { loadDocument, save, setRefreshTree } from "./editor.js";
 import { hideError, installErrorBanner, showError } from "./errors.js";
 
 const projectName = document.querySelector("#project-name");
@@ -74,6 +75,9 @@ async function boot() {
   renderChatPlaceholder();
   installErrorBanner();
   setEditorLoadDocument((path) => loadDocument(path));
+  // The editor refreshes the document tree after status-changing saves through
+  // the hook the editor owns; the sidebar owns the refresh implementation.
+  setRefreshTree(() => refreshTree());
   installSaveShortcut();
 
   const results = await Promise.allSettled([getConfig(), getTree()]);
