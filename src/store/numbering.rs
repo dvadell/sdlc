@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use crate::store::frontmatter::DecisionStatus;
 use crate::store::layout;
 use crate::store::path::DocPath;
 use crate::store::{DocStore, Expectation, StoreError};
@@ -132,47 +133,83 @@ impl DocStore {
         .map_err(|err| StoreError::Io(std::io::Error::other(err)))?
     }
 
-    /// Creates a new decision file at the next decision number, retrying with
-    /// a fresh number when a concurrent create already claimed it.
-    ///
-    /// The scan for the next number and the create run inside one write
-    /// critical section, and a lost race still surfaces as
-    /// [`StoreError::AlreadyExists`], which this helper answers by re-scanning
-    /// for the next number instead of overwriting.
-    pub async fn create_decision(&self, slug: &str, content: &str) -> Result<DocPath, StoreError> {
-        let content = content.to_string();
-        self.create_decision_at_next(slug.to_string(), move |_| content.clone())
+    /// Creates a new decision from a title with the ADR metadata of ticket
+    /// 0031: the status (`proposed` by default, or `accepted` / `superseded`) and
+    /// the optional supersedes target. The supersedes target may name a decision
+    /// that does not exist yet, which is reported as a warning instead of failing
+    /// the create.
+    pub async fn create_decision(
+        &self,
+        title: &str,
+        status: DecisionStatus,
+        supersedes: Option<u32>,
+    ) -> Result<(DocPath, Vec<String>), StoreError> {
+        let trimmed = title.trim();
+        if trimmed.is_empty()
+            || trimmed.contains('\n')
+            || trimmed.contains('\r')
+            || trimmed.chars().count() > crate::store::templates::MAX_TITLE_LEN
+        {
+            return Err(StoreError::InvalidTitle(trimmed.to_string()));
+        }
+        let title = trimmed.to_string();
+        let slug = crate::store::templates::slugify(&title)?;
+        self.create_decision_at_next(slug, title, status, supersedes)
             .await
     }
 
     /// Creates a new decision file at the next decision number, retrying with
-    /// a fresh number when a concurrent create already claimed it.
+    /// a fresh number when a concurrent create already claimed it, carrying the
+    /// ADR metadata of ticket 0031.
     ///
     /// The scan for the next number and the create run inside one write
     /// critical section, and a lost race still surfaces as
     /// [`StoreError::AlreadyExists`], which this helper answers by re-scanning
-    /// for the next number instead of overwriting. `content_of` renders the file
-    /// content from the freshly allocated number, so a retry after a lost race
-    /// writes content for the number that won.
+    /// for the next number instead of overwriting. `status` and `supersedes`
+    /// render the file content from the freshly allocated number, so a retry
+    /// after a lost race writes content for the number that won.
+    ///
+    /// A decision cannot supersede itself, which the freshly allocated number
+    /// makes detectable, and the refusal happens before the file is written. A
+    /// supersedes target that no existing decision carries is not a failure: the
+    /// create reports it as a warning, because the target may be added later.
     pub(crate) async fn create_decision_at_next(
         &self,
         slug: String,
-        content_of: impl Fn(u32) -> String + Send + 'static,
-    ) -> Result<DocPath, StoreError> {
+        title: String,
+        status: DecisionStatus,
+        supersedes: Option<u32>,
+    ) -> Result<(DocPath, Vec<String>), StoreError> {
         let writes = self.writes.clone();
         let root = self.root.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
+        tokio::task::spawn_blocking(move || -> Result<(DocPath, Vec<String>), StoreError> {
             let _guard = writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut last_error = None;
+            if let Some(target) = supersedes {
+                // Decision numbers run from 1 through MAX_NUMBER, so a pointer
+                // outside that range can never name a decision; refuse before
+                // allocating or writing.
+                if target == 0 || target > MAX_NUMBER {
+                    return Err(StoreError::InvalidSupersedes { supersedes: target });
+                }
+            }
 
             for _ in 0..MAX_CREATE_ATTEMPTS {
                 let number = match next_decision_number_at(&root) {
                     Ok(number) => number,
                     Err(error) => return Err(error),
                 };
+                if supersedes == Some(number) {
+                    // The pointer would name the decision being created, so the
+                    // new decision would supersede itself; record the deterministic
+                    // refusal through the retry path instead of returning early,
+                    // without writing anything.
+                    last_error = Some(StoreError::SelfSupersede { supersedes: number });
+                    break;
+                }
                 let decision_name = format_decision_name(number, &slug);
                 let path = DocPath::parse(&format!("sdlc/decisions/{decision_name}"))?;
                 let parent = path.as_path().parent().map(Path::to_path_buf);
@@ -191,10 +228,31 @@ impl DocStore {
                         return Err(StoreError::NotAllowed(path.as_path().display().to_string()));
                     }
                 };
-                let content = content_of(number);
+                let content =
+                    crate::store::templates::decision_content(number, &title, status, supersedes);
                 match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
                 {
-                    Ok(_) => return Ok(path),
+                    Ok(_) => {
+                        // The dangling-target check runs after the file is
+                        // committed, so a read failure is reported as a warning
+                        // here instead of failing the create that already succeeded.
+                        let mut warnings = Vec::new();
+                        if let Some(target) = supersedes {
+                            match decision_number_exists(&root, target) {
+                                Ok(true) => {}
+                                Ok(false) => warnings.push(format!(
+                                    "the decision {target} does not exist yet; the supersedes pointer may dangle until it is created"
+                                )),
+                                Err(error) => {
+                                    tracing::warn!(error = %error, "could not verify the supersedes target");
+                                    warnings.push(format!(
+                                        "the supersedes target {target} could not be verified: {error}"
+                                    ));
+                                }
+                            }
+                        }
+                        return Ok((path, warnings));
+                    }
                     Err(StoreError::AlreadyExists(_)) => {
                         last_error = Some(StoreError::AlreadyExists(format!(
                             "sdlc/decisions/{decision_name}"
@@ -398,6 +456,39 @@ pub(crate) fn next_available(highest: Option<u32>) -> Result<u32, StoreError> {
     }
 
     Ok(next)
+}
+
+/// Whether the project already holds a decision with the given number, so a
+/// supersedes pointer can be checked against the decision it names (ticket 0031).
+///
+/// A missing decisions directory means no decision exists yet, which reads as
+/// an absent target; any other read failure is a real filesystem error and is
+/// surfaced instead of being mistaken for an absent decision.
+pub(crate) fn decision_number_exists(root: &Path, number: u32) -> Result<bool, StoreError> {
+    let decisions_dir = root.join("sdlc").join("decisions");
+    let entries = match std::fs::read_dir(&decisions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(StoreError::Io(error)),
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        let file_type = entry.file_type().map_err(StoreError::Io)?;
+        if !file_type.is_file() {
+            continue;
+        }
+        if layout::numbered_number(&entry.file_name().to_string_lossy())
+            .is_some_and(|existing| existing == number)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 /// Formats an epic number and slug as the epic directory name: `0007-slug`.
@@ -675,5 +766,164 @@ mod tests {
             names.iter().any(|name| name.starts_with("0002-")),
             "the second number should be allocated: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_decision_writes_the_proposed_status_and_the_next_number() {
+        let (dir, store) = store_in_temp().await;
+
+        let (created, warnings) = store
+            .create_decision("Use axum", DecisionStatus::Proposed, None)
+            .await
+            .expect("the decision should be created");
+
+        assert_eq!(
+            created.as_path().display().to_string(),
+            "sdlc/decisions/0001-use-axum.md"
+        );
+        assert!(warnings.is_empty());
+
+        let content = fs::read_to_string(dir.path().join("sdlc/decisions/0001-use-axum.md"))
+            .expect("read the decision back");
+        assert!(content.starts_with("---\nstatus: proposed\n---\n\n"));
+        assert!(content.contains("# 0001: Use axum"));
+    }
+
+    #[tokio::test]
+    async fn create_decision_accepts_each_decision_status() {
+        let (_dir, store) = store_in_temp().await;
+
+        let (first, first_warnings) = store
+            .create_decision("Use axum", DecisionStatus::Proposed, None)
+            .await
+            .expect("the first decision should be created");
+        assert_eq!(
+            first.as_path().display().to_string(),
+            "sdlc/decisions/0001-use-axum.md"
+        );
+        assert!(first_warnings.is_empty());
+
+        let (second, second_warnings) = store
+            .create_decision("Use Postgres", DecisionStatus::Accepted, None)
+            .await
+            .expect("the second decision should be created");
+        assert_eq!(
+            second.as_path().display().to_string(),
+            "sdlc/decisions/0002-use-postgres.md"
+        );
+        assert!(second_warnings.is_empty());
+
+        let (third, third_warnings) = store
+            .create_decision("Use SQLite", DecisionStatus::Superseded, None)
+            .await
+            .expect("the third decision should be created");
+        assert_eq!(
+            third.as_path().display().to_string(),
+            "sdlc/decisions/0003-use-sqlite.md"
+        );
+        assert!(third_warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_decision_numbers_a_document_that_follows_a_gap() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/decisions")).expect("decisions dir");
+        std::fs::write(
+            dir.path().join("sdlc/decisions/0007-legacy.md"),
+            "---\nstatus: proposed\n---\n\n# 0007: Legacy\n",
+        )
+        .expect("write the decision");
+
+        let (created, _warnings) = store
+            .create_decision("Use axum", DecisionStatus::Proposed, None)
+            .await
+            .expect("the decision should be created");
+
+        assert_eq!(
+            created.as_path().display().to_string(),
+            "sdlc/decisions/0008-use-axum.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_decision_with_a_missing_supersedes_target_reports_a_warning() {
+        let (dir, store) = store_in_temp().await;
+
+        let (_created, warnings) = store
+            .create_decision("Use axum", DecisionStatus::Proposed, Some(42))
+            .await
+            .expect("a missing supersedes target is a warning, not a failure");
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("the decision 42 does not exist yet"));
+        assert!(
+            dir.path().join("sdlc/decisions/0001-use-axum.md").is_file(),
+            "the decision is still created"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_decision_refuses_a_decision_that_supersedes_itself() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .create_decision("Use axum", DecisionStatus::Proposed, Some(1))
+            .await
+            .expect_err("a decision cannot supersede itself");
+
+        assert!(
+            matches!(error, StoreError::SelfSupersede { supersedes: 1 }),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_decision_with_a_non_positive_supersedes_target_is_refused() {
+        let (_dir, store) = store_in_temp().await;
+
+        let error = store
+            .create_decision("Use axum", DecisionStatus::Proposed, Some(0))
+            .await
+            .expect_err("a supersedes pointer of zero can never name a decision");
+
+        assert!(
+            matches!(error, StoreError::InvalidSupersedes { supersedes: 0 }),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_decision_keeps_the_supersedes_pointer_across_a_round_trip() {
+        let (dir, store) = store_in_temp().await;
+        let (_first, first_warnings) = store
+            .create_decision("Use axum", DecisionStatus::Proposed, None)
+            .await
+            .expect("the first decision should be created");
+        assert!(first_warnings.is_empty());
+        let (second, second_warnings) = store
+            .create_decision("Use Postgres", DecisionStatus::Accepted, Some(1))
+            .await
+            .expect("the second decision should be created");
+        assert!(second_warnings.is_empty());
+
+        let second_path = "sdlc/decisions/0002-use-postgres.md";
+        let content = fs::read_to_string(dir.path().join(second_path)).expect("read the decision");
+        assert!(content.starts_with("---\nstatus: accepted\nsupersedes: 1\n---\n\n"));
+        assert!(content.contains("# 0002: Use Postgres"));
+
+        let document = store.read(&second).await.expect("read the decision");
+        let meta = crate::store::frontmatter::parse_decision(&document.content, second_path);
+        assert_eq!(meta.status, Some(DecisionStatus::Accepted));
+        assert_eq!(meta.supersedes, Some(1));
+
+        store
+            .write(&second, &content, &Expectation::Existing(document.hash))
+            .await
+            .expect("save the decision");
+
+        let reread = store.read(&second).await.expect("read the decision again");
+        let meta = crate::store::frontmatter::parse_decision(&reread.content, second_path);
+        assert_eq!(meta.status, Some(DecisionStatus::Accepted));
+        assert_eq!(meta.supersedes, Some(1));
     }
 }

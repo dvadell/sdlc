@@ -163,6 +163,22 @@ impl From<StoreError> for ApiError {
                 "conflict",
                 crate::store::epic_has_tickets_message(tickets),
             ),
+            StoreError::SelfSupersede { supersedes } => {
+                tracing::warn!(supersedes, "a decision cannot supersede itself");
+                Self::fixed(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "a decision cannot supersede itself",
+                )
+            }
+            StoreError::InvalidSupersedes { supersedes } => {
+                tracing::warn!(supersedes, "the supersedes decision number is invalid");
+                Self::fixed(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "the supersedes decision number is invalid",
+                )
+            }
             StoreError::Io(cause) => {
                 error!("store io error: {cause:?}");
                 Self::fixed(
@@ -353,6 +369,16 @@ mod tests {
                 },
                 StatusCode::CONFLICT,
                 "conflict",
+            ),
+            (
+                StoreError::InvalidSupersedes { supersedes: 0 },
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+            ),
+            (
+                StoreError::SelfSupersede { supersedes: 1 },
+                StatusCode::BAD_REQUEST,
+                "bad_request",
             ),
             (
                 StoreError::Io(io::Error::other("disk failed")),

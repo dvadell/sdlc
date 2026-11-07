@@ -169,6 +169,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "core",
                     "title": "Product requirements",
                     "status": null,
+                    "supersedes": null,
                     "epic": null,
                     "feature": null
                 },
@@ -177,6 +178,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "core",
                     "title": "Architecture",
                     "status": null,
+                    "supersedes": null,
                     "epic": null,
                     "feature": null
                 },
@@ -185,6 +187,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "core",
                     "title": "Conventions",
                     "status": null,
+                    "supersedes": null,
                     "epic": null,
                     "feature": null
                 },
@@ -193,6 +196,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "core",
                     "title": "Agent rules",
                     "status": null,
+                    "supersedes": null,
                     "epic": null,
                     "feature": null
                 },
@@ -201,6 +205,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "epic",
                     "title": "0001: Foundation",
                     "status": "planned",
+                    "supersedes": null,
                     "epic": null,
                     "feature": null
                 },
@@ -209,6 +214,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "ticket",
                     "title": "0001: Project skeleton",
                     "status": "todo",
+                    "supersedes": null,
                     "epic": "0001-foundation",
                     "feature": "export"
                 },
@@ -217,6 +223,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "decision",
                     "title": "0003: Use axum",
                     "status": "proposed",
+                    "supersedes": null,
                     "epic": null,
                     "feature": null
                 },
@@ -225,6 +232,7 @@ async fn tree_returns_the_store_shape_exactly() {
                     "kind": "feature",
                     "title": "Export",
                     "status": "shipped",
+                    "supersedes": null,
                     "epic": null,
                     "feature": null
                 }

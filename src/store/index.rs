@@ -306,6 +306,7 @@ mod tests {
             status: status.map(|status| status.to_string()),
             epic: None,
             feature: None,
+            supersedes: None,
         }
     }
 

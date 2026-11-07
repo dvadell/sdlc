@@ -9,6 +9,7 @@
 //! markers owned by the index writer (ticket 0028).
 
 use crate::store::StoreError;
+use crate::store::frontmatter::DecisionStatus;
 
 /// The maximum length of a validated document title, in characters.
 pub const MAX_TITLE_LEN: usize = 200;
@@ -29,11 +30,26 @@ pub fn feature_content(title: &str) -> String {
     format!("---\nstatus: planned\n---\n\n# {title}\n")
 }
 
-/// Renders the content of a new decision: proposed status (ticket 0015) and the
-/// numbered H1 with the context, decision and consequences sections.
-pub fn decision_content(number: u32, title: &str) -> String {
+/// Renders the content of a new decision (ticket 0031): the ADR status, the
+/// optional supersedes pointer and the numbered H1 with the context, decision
+/// and consequences sections.
+pub fn decision_content(
+    number: u32,
+    title: &str,
+    status: DecisionStatus,
+    supersedes: Option<u32>,
+) -> String {
+    let mut front_matter = "---\n".to_string();
+    front_matter.push_str(&format!("status: {}\n", status.as_str()));
+    if let Some(supersedes) = supersedes {
+        // The pointer is a decision number without leading zeros; the file name
+        // keeps the zero padding, so the target is compared numerically.
+        front_matter.push_str(&format!("supersedes: {supersedes}\n"));
+    }
+    front_matter.push_str("---\n\n");
+
     format!(
-        "---\nstatus: proposed\n---\n\n# {number:04}: {title}\n\n## Context\nWhy this decision was needed.\n\n## Decision\nWhat was chosen.\n\n## Consequences\nWhat gets easier, what gets harder.\n"
+        "{front_matter}# {number:04}: {title}\n\n## Context\nWhy this decision was needed.\n\n## Decision\nWhat was chosen.\n\n## Consequences\nWhat gets easier, what gets harder.\n"
     )
 }
 
@@ -156,13 +172,21 @@ mod tests {
 
     #[test]
     fn decision_content_carries_the_proposed_status_and_numbered_h1() {
-        let content = decision_content(9, "Use serde_yaml_ng");
+        let content = decision_content(9, "Use serde_yaml_ng", DecisionStatus::Proposed, None);
 
         assert!(content.starts_with("---\nstatus: proposed\n---\n\n"));
         assert!(content.contains("# 0009: Use serde_yaml_ng"));
         assert!(content.contains("## Context"));
         assert!(content.contains("## Decision"));
         assert!(content.contains("## Consequences"));
+    }
+
+    #[test]
+    fn decision_content_carries_the_status_and_the_supersedes_pointer() {
+        let content = decision_content(10, "Use serde_yaml_ng", DecisionStatus::Accepted, Some(9));
+
+        assert!(content.starts_with("---\nstatus: accepted\nsupersedes: 9\n---\n\n"));
+        assert!(content.contains("# 0010: Use serde_yaml_ng"));
     }
 
     #[test]

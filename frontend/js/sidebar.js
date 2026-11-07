@@ -236,9 +236,46 @@ async function createFromGroup(group) {
     feature = String(featurePrompt).trim() || undefined;
   }
 
+  let status;
+  let supersedes;
+  if (kind === "decision") {
+    const statusPrompt = window.prompt(
+      "New decision status (proposed, accepted or superseded):",
+      "proposed",
+    );
+    if (statusPrompt === null) {
+      return;
+    }
+    const pickedStatus = String(statusPrompt).trim();
+    if (!["proposed", "accepted", "superseded"].includes(pickedStatus)) {
+      showError(new Error("The decision status must be proposed, accepted or superseded."));
+      return;
+    }
+    status = pickedStatus;
+    const supersedesPrompt = window.prompt("Supersedes decision number (optional):", "");
+    if (supersedesPrompt === null) {
+      return;
+    }
+    const pickedSupersedes = String(supersedesPrompt).trim();
+    const parsedSupersedes = Number(pickedSupersedes);
+    const isPositiveInteger =
+      /^\d+$/.test(pickedSupersedes) &&
+      Number.isInteger(parsedSupersedes) &&
+      parsedSupersedes > 0 &&
+      parsedSupersedes <= 9999;
+    if (pickedSupersedes.length > 0 && !isPositiveInteger) {
+      // The prompt must name a positive integer decision number; anything
+      // else (fractions, signs, scientific notation) is refused up front
+      // instead of failing the create request later as a generic 400.
+      showError(new Error("The superseded decision number must be a positive integer."));
+      return;
+    }
+    supersedes = pickedSupersedes.length > 0 && isPositiveInteger ? parsedSupersedes : undefined;
+  }
+
   setActionsDisabled(true);
   try {
-    const created = await createDoc(kind, trimmedTitle, epic, feature);
+    const created = await createDoc(kind, trimmedTitle, epic, feature, status, supersedes);
     if (typeof created?.path !== "string" || created.path.length === 0) {
       throw new Error("The server did not return a document path.");
     }
@@ -714,6 +751,15 @@ function createRow(group, entry, docs) {
     badge.className = "doc-badge";
     badge.textContent = entry.status;
     row.appendChild(badge);
+  }
+
+  if (entry.kind === "decision" && entry.supersedes !== null && entry.supersedes !== undefined) {
+    // Decisions carry an optional supersedes pointer to another decision; the
+    // badge names the superseded decision in four-digit form (ticket 0031).
+    const supersedes = document.createElement("span");
+    supersedes.className = "doc-badge";
+    supersedes.textContent = `supersedes ${String(entry.supersedes).padStart(4, "0")}`;
+    row.appendChild(supersedes);
   }
 
   if (group === "epic") {

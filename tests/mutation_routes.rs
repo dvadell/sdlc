@@ -266,6 +266,202 @@ async fn create_each_kind_returns_201_and_the_document_appears_in_the_tree() {
 }
 
 #[tokio::test]
+async fn create_decision_defaults_to_a_proposed_status_and_accepts_each_decision_status() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let proposed = server
+        .create(json!({ "kind": "decision", "title": "Use axum" }))
+        .await;
+    assert_eq!(proposed.status, 201);
+    assert_eq!(proposed.path(), "sdlc/decisions/0001-use-axum.md");
+    let proposed_content = fs::read_to_string(dir.path().join("sdlc/decisions/0001-use-axum.md"))
+        .expect("read the created decision");
+    assert!(proposed_content.starts_with("---\nstatus: proposed\n---\n\n"));
+
+    let accepted = server
+        .create(json!({ "kind": "decision", "title": "Use Postgres", "status": "accepted" }))
+        .await;
+    assert_eq!(accepted.path(), "sdlc/decisions/0002-use-postgres.md");
+    let accepted_content =
+        fs::read_to_string(dir.path().join("sdlc/decisions/0002-use-postgres.md"))
+            .expect("read the created decision");
+    assert!(accepted_content.starts_with("---\nstatus: accepted\n---\n\n"));
+
+    let superseded = server
+        .create(json!({ "kind": "decision", "title": "Use SQLite", "status": "superseded" }))
+        .await;
+    assert_eq!(superseded.path(), "sdlc/decisions/0003-use-sqlite.md");
+    let superseded_content =
+        fs::read_to_string(dir.path().join("sdlc/decisions/0003-use-sqlite.md"))
+            .expect("read the created decision");
+    assert!(superseded_content.starts_with("---\nstatus: superseded\n---\n\n"));
+}
+
+#[tokio::test]
+async fn create_decision_with_an_invalid_status_returns_400_and_writes_nothing() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server
+        .create(json!({ "kind": "decision", "title": "Use axum", "status": "bogus" }))
+        .await;
+
+    assert_error(&response, 400, "bad_request");
+    assert!(!dir.path().join("sdlc/decisions").exists());
+}
+
+#[tokio::test]
+async fn create_decision_with_a_non_numeric_supersedes_target_returns_400_and_writes_nothing() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server
+        .create(json!({ "kind": "decision", "title": "Use axum", "supersedes": "not-a-number" }))
+        .await;
+
+    assert_error(&response, 400, "bad_request");
+    assert!(!dir.path().join("sdlc/decisions").exists());
+}
+
+#[tokio::test]
+async fn create_decision_that_supersedes_itself_returns_400_and_writes_nothing() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    // The first decision of a project is numbered `0001`, so a pointer to it
+    // names the decision being created.
+    let response = server
+        .create(json!({ "kind": "decision", "title": "Use axum", "supersedes": 1 }))
+        .await;
+
+    assert_error(&response, 400, "bad_request");
+    assert!(!dir.path().join("sdlc/decisions").exists());
+}
+
+#[tokio::test]
+async fn create_decision_with_a_missing_supersedes_target_returns_201_with_a_warning() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server
+        .create(json!({ "kind": "decision", "title": "Use axum", "supersedes": 42 }))
+        .await;
+
+    assert_eq!(response.status, 201);
+    let path = response.path();
+    assert_eq!(path, "sdlc/decisions/0001-use-axum.md");
+    let content = fs::read_to_string(dir.path().join(&path)).expect("read the created decision");
+    assert!(content.starts_with("---\nstatus: proposed\nsupersedes: 42\n---\n\n"));
+
+    let json = response.json();
+    let warnings = json["warnings"]
+        .as_array()
+        .expect("a missing supersedes target is reported as a create warning");
+    assert_eq!(warnings.len(), 1, "the body was: {}", response.body);
+    assert!(
+        warnings[0]
+            .as_str()
+            .expect("the warning is a string")
+            .contains("42")
+    );
+
+    let tree = server.get("/api/tree").await.json();
+    let entry = tree["docs"]
+        .as_array()
+        .expect("docs")
+        .iter()
+        .find(|doc| doc["path"] == path)
+        .expect("the created decision should be in the tree");
+    assert_eq!(entry["kind"], "decision");
+    assert_eq!(entry["status"], "proposed");
+    assert_eq!(entry["supersedes"], json!(42));
+}
+
+#[tokio::test]
+async fn create_decision_with_a_blank_status_defaults_to_proposed() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server
+        .create(json!({ "kind": "decision", "title": "Use axum", "status": "" }))
+        .await;
+
+    assert_eq!(response.status, 201);
+    let path = response.path();
+    assert_eq!(path, "sdlc/decisions/0001-use-axum.md");
+    let content = fs::read_to_string(dir.path().join(&path)).expect("read the created decision");
+    assert!(content.starts_with("---\nstatus: proposed\n---\n\n"));
+}
+
+#[tokio::test]
+async fn create_decision_with_a_non_positive_supersedes_target_returns_400_and_writes_nothing() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server
+        .create(json!({ "kind": "decision", "title": "Use axum", "supersedes": 0 }))
+        .await;
+
+    assert_error(&response, 400, "bad_request");
+    assert!(!dir.path().join("sdlc/decisions").exists());
+}
+
+#[tokio::test]
+async fn create_decision_superseding_an_existing_decision_has_no_create_warning() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let first = server
+        .create(json!({ "kind": "decision", "title": "Use axum" }))
+        .await;
+    assert_eq!(first.status, 201);
+
+    let second = server
+        .create(json!({
+            "kind": "decision",
+            "title": "Use Postgres",
+            "status": "accepted",
+            "supersedes": 1
+        }))
+        .await;
+
+    assert_eq!(second.status, 201);
+    let json = second.json();
+    assert!(
+        json.get("warnings").is_none(),
+        "an existing supersedes target carries no warning; the body was: {}",
+        second.body
+    );
+}
+
+#[tokio::test]
+async fn create_decision_with_a_status_for_a_feature_returns_400_and_writes_nothing() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server
+        .create(json!({ "kind": "feature", "title": "Export", "status": "proposed" }))
+        .await;
+
+    assert_error(&response, 400, "bad_request");
+    assert!(!dir.path().join("sdlc/features").exists());
+}
+
+#[tokio::test]
+async fn create_a_decision_with_an_epic_reference_returns_400_and_writes_nothing() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server
+        .create(json!({ "kind": "decision", "title": "Use axum", "epic": "0001-foundation" }))
+        .await;
+
+    assert_error(&response, 400, "bad_request");
+    assert!(!dir.path().join("sdlc/decisions").exists());
+}
+
+#[tokio::test]
 async fn create_epic_uses_the_next_number_and_keeps_an_existing_epic() {
     let dir = TempDir::new().expect("temp project");
     write(

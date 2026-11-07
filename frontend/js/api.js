@@ -107,13 +107,21 @@ export async function saveDoc(path, content, expectedHash) {
   return request("PUT", docUrl(path), { content, expected_hash: expectedHash });
 }
 
-export async function createDoc(kind, title, epic, feature) {
+export async function createDoc(kind, title, epic, feature, status, supersedes) {
   const body = { kind, title };
   if (epic) {
     body.epic = epic;
   }
   if (feature) {
     body.feature = feature;
+  }
+  if (kind === "decision") {
+    // Decisions create with an ADR status (default `proposed`) and an optional
+    // supersedes pointer to another decision number (ticket 0031).
+    body.status = status ?? "proposed";
+    if (supersedes !== undefined && supersedes !== null && supersedes !== "") {
+      body.supersedes = supersedes;
+    }
   }
   return request("POST", "/api/docs", body);
 }

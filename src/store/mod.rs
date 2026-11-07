@@ -86,6 +86,16 @@ pub enum StoreError {
     /// A filesystem operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// The supersedes pointer names the decision being created, so the new
+    /// decision would supersede itself; refused before the write (ticket 0031).
+    #[error("a decision cannot supersede itself: {supersedes}")]
+    SelfSupersede { supersedes: u32 },
+
+    /// The supersedes pointer names a decision number that can never exist, so
+    /// the create is refused before anything is written (ticket 0031).
+    #[error("the supersedes decision number is invalid: {supersedes}")]
+    InvalidSupersedes { supersedes: u32 },
 }
 
 pub use layout::{CoreDoc, DocKind};
@@ -413,6 +423,11 @@ impl DocStore {
     /// The PRD feature index refresh after creating a feature is the caller's
     /// responsibility: callers that keep the index in sync invoke
     /// [`DocStore::refresh_feature_index`] themselves and surface its warnings.
+    ///
+    /// Only decision creation can produce warnings (a dangling supersedes
+    /// pointer); the generic decision create answers with the default status and
+    /// no supersedes pointer, so it cannot produce any and the decision-aware
+    /// create owns the warning reporting instead of this generic path.
     pub async fn create(
         &self,
         kind: DocKind,
@@ -445,10 +460,22 @@ impl DocStore {
                 Ok(path)
             }
             DocKind::Decision => {
-                self.create_decision_at_next(slug.clone(), move |number| {
-                    templates::decision_content(number, &title)
-                })
-                .await
+                // Decisions carry the ADR metadata of ticket 0031; the generic
+                // create serves the default `proposed` status of a new decision
+                // and no supersedes pointer, so the default create can neither
+                // dangle nor self-supersede and its create warnings are not
+                // surfaced here; the decision-aware create returns them instead.
+                let (created, _warnings) = self
+                    .create_decision_at_next(
+                        slug,
+                        title,
+                        crate::store::frontmatter::DecisionStatus::Proposed,
+                        None,
+                    )
+                    .await?;
+                // `_warnings` is always empty for this default create: it carries
+                // no supersedes pointer, so nothing can dangle or self-supersede.
+                Ok(created)
             }
             DocKind::Ticket => {
                 let epic = epic.ok_or_else(|| {

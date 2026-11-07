@@ -30,6 +30,9 @@ pub struct DocEntry {
     pub epic: Option<String>,
     /// The optional feature slug a ticket belongs to; `None` when absent.
     pub feature: Option<String>,
+    /// The decision this decision supersedes, as a decision number; `None`
+    /// for kinds that carry no supersedes pointer.
+    pub supersedes: Option<u32>,
 }
 
 /// The document tree of one project.
@@ -196,7 +199,7 @@ impl DocStore {
                 return None;
             }
         };
-        let (status, feature) = metadata_of(kind, &document.content, &file);
+        let (status, feature, supersedes) = metadata_of(kind, &document.content, &file);
 
         Some(DocEntry {
             path: path.clone(),
@@ -205,6 +208,7 @@ impl DocStore {
             status,
             epic,
             feature,
+            supersedes,
         })
     }
 
@@ -296,6 +300,7 @@ pub(crate) fn feature_entries(root: &Path) -> (Vec<DocEntry>, Vec<String>) {
                 .map(|status| status.as_str().to_string()),
             epic: None,
             feature: None,
+            supersedes: None,
         });
     }
 
@@ -303,22 +308,39 @@ pub(crate) fn feature_entries(root: &Path) -> (Vec<DocEntry>, Vec<String>) {
     (entries, warnings)
 }
 
-/// The status and optional feature binding of a document, parsed from a
-/// single front matter pass. Only tickets carry a feature binding.
-fn metadata_of(kind: DocKind, content: &str, file: &str) -> (Option<String>, Option<String>) {
+/// The status, feature binding and supersedes pointer of a document, parsed
+/// from a single front matter pass. Only tickets carry a feature binding and
+/// only decisions carry a supersedes pointer.
+fn metadata_of(
+    kind: DocKind,
+    content: &str,
+    file: &str,
+) -> (Option<String>, Option<String>, Option<u32>) {
     match kind {
-        DocKind::Core(_) => (None, None),
+        DocKind::Core(_) => (None, None, None),
         DocKind::Epic => {
             let meta = frontmatter::parse_epic(content, file);
-            (meta.status.map(|status| status.as_str().to_owned()), None)
+            (
+                meta.status.map(|status| status.as_str().to_owned()),
+                None,
+                None,
+            )
         }
         DocKind::Feature => {
             let meta = frontmatter::parse_feature(content, file);
-            (meta.status.map(|status| status.as_str().to_owned()), None)
+            (
+                meta.status.map(|status| status.as_str().to_owned()),
+                None,
+                None,
+            )
         }
         DocKind::Decision => {
             let meta = frontmatter::parse_decision(content, file);
-            (meta.status.map(|status| status.as_str().to_owned()), None)
+            (
+                meta.status.map(|status| status.as_str().to_owned()),
+                None,
+                meta.supersedes,
+            )
         }
         DocKind::Ticket => {
             let meta = frontmatter::parse_ticket(content, file);
@@ -326,6 +348,7 @@ fn metadata_of(kind: DocKind, content: &str, file: &str) -> (Option<String>, Opt
                 meta.status.map(|status| status.as_str().to_owned()),
                 meta.feature
                     .map(|feature| feature.strip_suffix(".md").unwrap_or(&feature).to_owned()),
+                None,
             )
         }
     }
@@ -618,6 +641,24 @@ mod tests {
         assert_eq!(entry.kind, DocKind::Ticket);
         assert_eq!(entry.status.as_deref(), Some("todo"));
         assert_eq!(entry.feature.as_deref(), Some("export"));
+    }
+
+    #[tokio::test]
+    async fn tree_lists_a_decision_without_front_matter_with_no_status() {
+        let (dir, store) = store_in_temp().await;
+        write(
+            &dir,
+            "sdlc/decisions/0003-use-axum.md",
+            "# 0003: Use axum\n",
+        );
+
+        let tree = store.tree().await;
+
+        assert_eq!(tree.docs.len(), 1);
+        let entry = &tree.docs[0];
+        assert_eq!(entry.kind, DocKind::Decision);
+        assert_eq!(entry.status, None);
+        assert_eq!(entry.supersedes, None);
     }
 
     #[test]

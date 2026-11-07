@@ -1,5 +1,5 @@
 ---
-status: todo
+status: done
 depends_on: ["0012", "0015"]
 ---
 
@@ -33,12 +33,12 @@ optional `supersedes` pointer that is validated.
 
 ## Acceptance criteria
 
-- [ ] New decisions default to `proposed` and get the next number.
-- [ ] An accepted/superseded decision keeps its number after edit.
-- [ ] Invalid status is rejected at creation, not written.
-- [ ] `supersedes` pointing at a missing number produces a warning.
-- [ ] `supersedes` pointing at itself is rejected.
-- [ ] Tree entries include status and supersedes.
+- [x] New decisions default to `proposed` and get the next number.
+- [x] An accepted/superseded decision keeps its number after edit.
+- [x] Invalid status is rejected at creation, not written.
+- [x] `supersedes` pointing at a missing number produces a warning.
+- [x] `supersedes` pointing at itself is rejected.
+- [x] Tree entries include status and supersedes.
 
 ## Tests
 

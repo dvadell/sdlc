@@ -13,6 +13,7 @@
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_yaml_ng::from_str;
+use std::str::FromStr;
 
 /// The line that opens and closes a front matter block.
 const DELIMITER: &str = "---";
@@ -143,6 +144,44 @@ status_as_str!(
     Accepted => "accepted",
     Superseded => "superseded"
 );
+
+/// The error returned when a decision status is outside the
+/// `proposed | accepted | superseded` vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InvalidDecisionStatus;
+
+impl std::fmt::Display for InvalidDecisionStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "unknown decision status")
+    }
+}
+
+impl std::error::Error for InvalidDecisionStatus {}
+
+impl DecisionStatus {
+    /// Parses one decision status from its front matter value, or `None` when
+    /// the value is outside the `proposed | accepted | superseded` vocabulary;
+    /// values are not lowercased and not case-normalized.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::from_str(value).ok()
+    }
+}
+
+impl std::str::FromStr for DecisionStatus {
+    type Err = InvalidDecisionStatus;
+
+    /// Parses one decision status from its front matter value, or fails when
+    /// the value is outside the `proposed | accepted | superseded` vocabulary;
+    /// values are not lowercased and not case-normalized.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim() {
+            "proposed" => Ok(DecisionStatus::Proposed),
+            "accepted" => Ok(DecisionStatus::Accepted),
+            "superseded" => Ok(DecisionStatus::Superseded),
+            _ => Err(InvalidDecisionStatus),
+        }
+    }
+}
 
 status_as_str!(
     TicketStatus,
@@ -472,6 +511,19 @@ mod tests {
 
         assert_eq!(meta.status, Some(FeatureStatus::Shipped));
         assert_eq!(meta.feature, None);
+    }
+
+    #[test]
+    fn decision_without_front_matter_yields_empty_metadata() {
+        let meta = parse_decision(
+            "# 0003: Use axum\n\n## Context\nWhy this decision was needed.\n",
+            "sdlc/decisions/0003-use-axum.md",
+        );
+
+        assert_eq!(meta.status, None);
+        assert_eq!(meta.supersedes, None);
+        assert_eq!(meta.feature, None);
+        assert!(meta.depends_on.is_empty());
     }
 
     #[test]

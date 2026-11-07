@@ -34,6 +34,9 @@ struct DocEntryResponse {
     title: String,
     /// The front matter status, when present.
     status: Option<String>,
+    /// The optional decision supersedes pointer as a decision number; `None`
+    /// for kinds that carry no supersedes.
+    supersedes: Option<u32>,
     /// The epic directory of a ticket.
     epic: Option<String>,
     /// The optional feature binding of a ticket.
@@ -79,12 +82,23 @@ pub(crate) struct CreateRequest {
     kind: String,
     /// The title rendered into the new document.
     title: String,
-    /// The target epic directory for a ticket.
+    /// The target epic directory for a ticket; ticket-only, so a create of
+    /// another kind carrying one is refused.
     #[serde(default)]
     epic: Option<String>,
-    /// The optional feature slug for a ticket.
+    /// The optional feature slug for a ticket; ticket-only, so a create of
+    /// another kind carrying one is refused.
     #[serde(default)]
     feature: Option<String>,
+    /// The status of a decision: `proposed`, `accepted` or `superseded`; the
+    /// default is `proposed` (ticket 0031).
+    ///
+    /// A blank value is treated as absent, so the default applies.
+    #[serde(default)]
+    status: Option<String>,
+    /// The optional decision number a decision supersedes (ticket 0031).
+    #[serde(default)]
+    supersedes: Option<u32>,
 }
 
 /// A created document's path and content hash.
@@ -94,8 +108,9 @@ pub(crate) struct CreateResponse {
     path: String,
     /// Lowercase hex SHA-256 of the content that was written.
     hash: String,
-    /// Warnings from refreshing the PRD feature index after a created feature,
-    /// so the person knows the index may be stale; absent for every other kind.
+    /// Warnings from creating the document: the PRD feature index refresh
+    /// outcome for a created feature, or the dangling-supersedes notice for a
+    /// created decision; absent for every other kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     warnings: Option<Vec<String>>,
 }
@@ -161,6 +176,7 @@ impl From<DocEntry> for DocEntryResponse {
             kind: kind_name(entry.kind),
             title: entry.title,
             status: entry.status,
+            supersedes: entry.supersedes,
             epic: entry.epic,
             feature: entry.feature,
         }
@@ -233,7 +249,10 @@ pub(crate) async fn put_doc(
 /// Handles `POST /api/docs`.
 ///
 /// The kind and any path-shaped references are validated before the store is
-/// called. A ticket needs an epic directory; its feature binding is optional.
+/// called. A ticket needs an epic directory; its feature binding is optional. A
+/// kind-specific field that the kind does not carry is refused, so a status,
+/// epic or feature that does not belong to the kind fails fast instead of being
+/// silently ignored.
 pub(crate) async fn create_doc(
     State(state): State<AppState>,
     body: Result<Json<CreateRequest>, JsonRejection>,
@@ -242,6 +261,35 @@ pub(crate) async fn create_doc(
     let kind = parse_kind(&request.kind)?;
     let epic = non_blank(request.epic.as_deref());
     let feature = non_blank(request.feature.as_deref());
+    let status = match kind {
+        DocKind::Decision => Some(parse_decision_status(&request.status)?),
+        _ => {
+            // The decision status vocabulary is decision-only; a status sent
+            // for another kind is a misplaced field and is refused instead of
+            // being silently ignored.
+            if non_blank(request.status.as_deref()).is_some() {
+                return Err(ApiError::bad_request());
+            }
+            None
+        }
+    };
+
+    // The epic directory and the feature binding belong to tickets; carrying
+    // them for another kind is a misplaced field and is refused instead of
+    // being silently ignored.
+    if kind != DocKind::Ticket
+        && (non_blank(request.epic.as_deref()).is_some()
+            || non_blank(request.feature.as_deref()).is_some())
+    {
+        return Err(ApiError::bad_request());
+    }
+
+    // The supersedes pointer belongs to decisions; carrying it for another
+    // kind is a misplaced field and is refused instead of being silently
+    // ignored.
+    if kind != DocKind::Decision && request.supersedes.is_some() {
+        return Err(ApiError::bad_request());
+    }
 
     if kind == DocKind::Ticket {
         let epic = epic.ok_or_else(ApiError::bad_request)?;
@@ -251,16 +299,35 @@ pub(crate) async fn create_doc(
         }
     }
 
-    let created = state
-        .store
-        .create(kind, &request.title, epic, feature)
-        .await
-        .map_err(|error| map_create_error(kind, feature.is_some(), error))?;
+    let (created, create_warnings) = if kind == DocKind::Decision {
+        let (created, warnings) = state
+            .store
+            .create_decision(
+                &request.title,
+                status.unwrap_or(crate::store::frontmatter::DecisionStatus::Proposed),
+                request.supersedes,
+            )
+            .await
+            .map_err(|error| map_create_error(kind, false, error))?;
+        (created, warnings)
+    } else {
+        let created = state
+            .store
+            .create(kind, &request.title, epic, feature)
+            .await
+            .map_err(|error| map_create_error(kind, feature.is_some(), error))?;
+        (created, Vec::new())
+    };
     let document = state.store.read(&created).await?;
 
     // The refresh eligibility is derived from the created path, so a feature
-    // created through the API keeps the PRD feature index in sync.
-    let warnings = feature_refresh_warnings(&state, &[&created]).await;
+    // created through the API keeps the PRD feature index in sync; decisions
+    // carry their own create warnings instead (ticket 0031).
+    let warnings = if kind == DocKind::Decision {
+        (!create_warnings.is_empty()).then_some(create_warnings)
+    } else {
+        feature_refresh_warnings(&state, &[&created]).await
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -355,6 +422,21 @@ fn parse_kind(raw: &str) -> Result<DocKind, ApiError> {
         "ticket" => Ok(DocKind::Ticket),
         _ => Err(ApiError::bad_request()),
     }
+}
+
+/// Parses the status of a decision create request, defaulting to `proposed`
+/// when the field is absent or blank and rejecting any value outside the
+/// `proposed | accepted | superseded` vocabulary before the store writes the
+/// new decision (ticket 0031).
+fn parse_decision_status(
+    raw: &Option<String>,
+) -> Result<crate::store::frontmatter::DecisionStatus, ApiError> {
+    let raw = raw
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("proposed");
+    crate::store::frontmatter::DecisionStatus::parse(raw).ok_or_else(ApiError::bad_request)
 }
 
 /// The trimmed non-blank value of an optional reference field.
