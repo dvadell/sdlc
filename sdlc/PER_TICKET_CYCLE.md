@@ -34,5 +34,9 @@
   (observed on ticket 0015: the run failed and the retry with `--resume` completed
   cleanly). When a review fails, re-run the same command with `--resume <session-id>`
   before assuming the code has a problem.
+- `ocr review` on a fix commit can come back with findings that target the fix
+  itself (e.g. offsets like `marker_end + 1`, byte-slice terminator handling); expect
+  iterative review rounds and re-run the review on the amended fix commit until it
+  comes back clean (0 findings).
 
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
