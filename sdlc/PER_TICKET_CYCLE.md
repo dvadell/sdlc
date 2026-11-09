@@ -38,5 +38,9 @@
   itself (e.g. offsets like `marker_end + 1`, byte-slice terminator handling); expect
   iterative review rounds and re-run the review on the amended fix commit until it
   comes back clean (0 findings).
+- The decision-create dialog settles its promise from inside a native `<dialog>`
+  setup that runs synchronously, so a test that makes `showModal` fail must install
+  the failure before the dialog is created (patch the prototype), not on the dialog
+  instance afterwards — an instance override installed afterwards never runs.
 
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
