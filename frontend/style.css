@@ -437,6 +437,82 @@ body {
   color: #8c1f1f;
 }
 
+/* The read-only supersedes line of the open decision (ticket 0032): the
+   pointer the front matter carries, or the number marked missing when the
+   target no longer exists; the line is never edited here, the status is. */
+.decision-supersedes {
+  margin: 0;
+  padding: 0.15rem 0.75rem;
+  border-bottom: 1px solid #e0e0e0;
+  color: #555555;
+  font-size: 0.85rem;
+}
+
+/* The small native dialog of the decision-create flow (ticket 0032); the
+   browser owns the focus trap and the Escape handling of a modal dialog. */
+.decision-dialog {
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  padding: 1rem;
+  width: min(90vw, 34rem);
+  background: #ffffff;
+  color: #1a1a1a;
+}
+
+.decision-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.decision-dialog-title {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  color: inherit;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+
+.decision-dialog-status,
+.decision-dialog-supersedes {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+
+.decision-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.decision-dialog button {
+  padding: 0.2rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.decision-dialog .decision-dialog-create {
+  background: #dbe7f8;
+  border-color: #9db9e0;
+}
+
+.decision-dialog-title:focus-visible,
+.decision-dialog-status:focus-visible,
+.decision-dialog-supersedes:focus-visible,
+.decision-dialog button:focus-visible {
+  outline: 2px solid #8bb0e8;
+  outline-offset: 2px;
+}
+
 .error-banner {
   position: fixed;
   top: 0;

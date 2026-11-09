@@ -1,11 +1,12 @@
 //! The document editor: textarea, dirty state, save and preview (tickets 0023
 //! and 0024), plus the save conflict banner (ticket 0027) and the status control
-//! of features and epics (ticket 0030).
+//! of features, epics and decisions (tickets 0030 and 0032), and the read-only
+//! supersedes line of decisions (ticket 0032).
 
 import { state } from "./state.js";
 import { ApiError, getDoc, saveDoc } from "./api.js";
 import { showError, showWarning, showWarnings } from "./errors.js";
-import { STATUS_OPTIONS, statusKindOf } from "./statuses.js";
+import { STATUS_OPTIONS, statusKindOf, decisionNumberOf } from "./statuses.js";
 
 // The textarea of the selected document; null until a document is loaded.
 let textarea = null;
@@ -41,7 +42,8 @@ let conflictBanner = null;
 // The refresh of the document tree after a save that can change a status
 // (ticket 0030); the sidebar owns the refresh implementation and hands it to the
 // editor through this hook, so this module keeps a single import direction and
-// never imports the sidebar module directly.
+// never imports the sidebar module directly. Decisions are status documents too
+// (ticket 0032), so their saves refresh the tree and update the sidebar badge.
 let refreshTreeHandler = null;
 
 // Installs the tree refresh the sidebar owns; called once from the app bootstrap
@@ -606,10 +608,11 @@ export function renderEditor() {
   });
   toolbar.appendChild(previewButton);
 
-  // The status select of the selected document lives in the editor toolbar
-  // only for features and epics, with the status vocabulary of the kind; every
-  // other kind gets no control (ticket 0030).
+  // The status select of the selected document lives in the editor toolbar for
+  // every kind whose status vocabulary the kind maps to (features, epics and
+  // decisions, ticket 0030 and 0032); every other kind gets no control.
   const kind = statusKindOf(state.current?.path);
+  let supersedesLine = null;
   if (kind && STATUS_OPTIONS[kind]) {
     const select = document.createElement("select");
     select.id = "document-status";
@@ -639,6 +642,22 @@ export function renderEditor() {
     documentStatus = null;
   }
 
+  if (kind === "decision") {
+    // The open decision carries a read-only supersedes line naming the decision
+    // it supersedes, or that decision's number marked missing when the target no
+    // longer exists (ticket 0032); the pointer is never edited from here, the
+    // status is, through the toolbar select above.
+    const supersedes = openSupersedes();
+    if (supersedes) {
+      supersedesLine = document.createElement("p");
+      supersedesLine.id = "decision-supersedes";
+      supersedesLine.className = "decision-supersedes";
+      supersedesLine.textContent = supersedes.missing
+        ? `Supersedes: ${String(supersedes.number).padStart(4, "0")} (missing)`
+        : `Supersedes: ${String(supersedes.number).padStart(4, "0")}`;
+    }
+  }
+
   textarea = document.createElement("textarea");
   textarea.id = "document-content";
   textarea.className = "document-content";
@@ -650,7 +669,30 @@ export function renderEditor() {
 
   element.appendChild(conflictBanner);
   element.appendChild(toolbar);
+  if (supersedesLine) {
+    element.appendChild(supersedesLine);
+  }
   element.appendChild(textarea);
+}
+
+// The supersedes pointer of the open decision, as a number and a missing flag;
+// null when the open document is not a decision or carries no pointer (ticket
+// 0032).
+export function openSupersedes() {
+  const path = state.current?.path;
+  if (statusKindOf(path) !== "decision") {
+    return null;
+  }
+  const entries = state.tree?.docs ?? [];
+  const entry = entries.find((doc) => doc?.path === path);
+  const number = entry?.supersedes ?? null;
+  if (number === null || number === undefined) {
+    return null;
+  }
+  const exists = entries.some(
+    (doc) => doc?.kind === "decision" && decisionNumberOf(doc.path) === Number(number),
+  );
+  return { number, missing: !exists };
 }
 
 // Shows the non-modal save conflict banner: the disk changed since the person
@@ -976,20 +1018,20 @@ export async function loadDocument(path) {
 }
 
 // After a successful save: surface the feature-index refresh outcome as
-// warnings and, for a feature or epic whose status the save may have changed,
-// refresh the document tree and re-read the saved status to sync the status
-// select (ticket 0030). The person may have switched documents while the save
-// was in flight, and a status save may itself be applying the result, so the
-// helper bails before writing state that no longer belongs to the selected
-// document; it returns whether the saved document is still the selected one.
-// Shared by the ordinary save path and the overwrite-with-mine conflict
-// resolution so the two cannot drift.
+// warnings and, for a document whose save may have changed a status (feature,
+// epic or decision), refresh the document tree and re-read the saved status to
+// sync the status select (ticket 0030, ticket 0032). The person may have switched
+// documents while the save was in flight, and a status save may itself be applying
+// the result, so the helper bails before writing state that no longer belongs to
+// the selected document; it returns whether the saved document is still the
+// selected one. The helper is shared by the ordinary save path and the overwrite-
+// with-mine conflict resolution so the two cannot drift.
 function refreshStatusAfterSave(path, savedContent, response) {
   const savedKind = statusKindOf(path);
   const hasStatus = Boolean(savedKind && STATUS_OPTIONS[savedKind]);
   if (hasStatus) {
-    // The saved document is a feature or an epic, so its sidebar badge may have
-    // changed and the PRD feature index was refreshed by the server during the
+    // The saved document is a feature, epic or decision, so its sidebar badge may
+    // have changed and the PRD feature index was refreshed by the server during the
     // save (ticket 0029); refresh the tree for those saves alone. The refresh is
     // best effort and must not turn a successful save into a reported failure, so
     // a failure surfaces as a warning while the save itself stays successful.

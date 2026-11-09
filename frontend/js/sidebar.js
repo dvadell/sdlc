@@ -4,6 +4,8 @@ import { state } from "./state.js";
 import { createDoc, deleteDoc, getTree, moveDoc, scaffold } from "./api.js";
 import { showError, showResponseWarnings, showWarning, warningsToText } from "./errors.js";
 import { clearEditor } from "./editor.js";
+import { openDecisionCreateDialog } from "./dialogs.js";
+import { STATUS_OPTIONS, decisionNumberOf } from "./statuses.js";
 
 // The groups of the document tree in the order the sidebar renders them. Tickets
 // will be grouped under their epic from ticket 0053 on; the flat per-group entry
@@ -200,21 +202,30 @@ function surfaceResponseWarnings(response) {
   }
 }
 
-// Creates a document of one group through the prompt flow of the v1 actions.
+// Creates a document of one group through the creation affordance of the group:
+// the small native dialog for decisions (ticket 0032) or the prompt flow for the
+// kinds that still prompt (epics, features, tickets, ticket 0052).
 async function createFromGroup(group) {
   const kind = CREATABLE_GROUPS[group].kind;
-  // Features and epics start with a `planned` status, so the prompt carries the
-  // short hint instead of the person discovering it in the file (ticket 0030).
-  const titlePrompt =
-    kind === "epic" || kind === "feature" ? `New ${kind} title (starts as planned):` : `New ${kind} title:`;
-  const title = window.prompt(titlePrompt);
-  if (title === null) {
-    return;
-  }
-  const trimmedTitle = String(title).trim();
-  if (trimmedTitle.length === 0) {
-    // window.prompt cannot validate inline; an empty title never reaches the server.
-    return;
+  let trimmedTitle;
+  if (kind !== "decision") {
+    // Decisions create through the small native dialog of ticket 0032, which
+    // asks for the title, the status and the optional supersedes target itself, so
+    // the generic title prompt is skipped for decisions (ticket 0032, final closing
+    // review round). Features and epics start with a `planned` status, so the
+    // prompt carries the short hint instead of the person discovering it in the
+    // file (ticket 0030).
+    const titlePrompt =
+      kind === "epic" || kind === "feature" ? `New ${kind} title (starts as planned):` : `New ${kind} title:`;
+    const title = window.prompt(titlePrompt);
+    if (title === null) {
+      return;
+    }
+    trimmedTitle = String(title).trim();
+    if (trimmedTitle.length === 0) {
+      // window.prompt cannot validate inline; an empty title never reaches the server.
+      return;
+    }
   }
 
   let epic;
@@ -238,44 +249,53 @@ async function createFromGroup(group) {
 
   let status;
   let supersedes;
+  let documentTitle;
   if (kind === "decision") {
-    const statusPrompt = window.prompt(
-      "New decision status (proposed, accepted or superseded):",
-      "proposed",
-    );
-    if (statusPrompt === null) {
+    // Decisions create through the small native dialog of ticket 0032: the
+    // title, the status and the optional supersedes target of the ADR, instead
+    // of the generic prompt flow. The dialog resolves null when the person
+    // dismissed it, and the create is only attempted when an outcome was picked.
+    const decisions = (state.tree?.docs ?? []).filter((doc) => doc?.kind === "decision");
+    const outcome = await openDecisionCreateDialog(decisions);
+    if (outcome === null || outcome === undefined) {
       return;
     }
-    const pickedStatus = String(statusPrompt).trim();
-    if (!["proposed", "accepted", "superseded"].includes(pickedStatus)) {
+    const decidedTitle = String(outcome.title ?? "").trim();
+    if (decidedTitle.length === 0) {
+      showError(new Error("A decision needs a title."));
+      return;
+    }
+    const decidedStatus = String(outcome.status ?? STATUS_OPTIONS.decision[0]);
+    if (!STATUS_OPTIONS.decision.includes(decidedStatus)) {
       showError(new Error("The decision status must be proposed, accepted or superseded."));
       return;
     }
-    status = pickedStatus;
-    const supersedesPrompt = window.prompt("Supersedes decision number (optional):", "");
-    if (supersedesPrompt === null) {
-      return;
-    }
-    const pickedSupersedes = String(supersedesPrompt).trim();
+    documentTitle = decidedTitle;
+    status = decidedStatus;
+    const pickedSupersedes = outcome.supersedes;
     const parsedSupersedes = Number(pickedSupersedes);
     const isPositiveInteger =
-      /^\d+$/.test(pickedSupersedes) &&
+      /^\d+$/.test(String(pickedSupersedes)) &&
       Number.isInteger(parsedSupersedes) &&
       parsedSupersedes > 0 &&
       parsedSupersedes <= 9999;
-    if (pickedSupersedes.length > 0 && !isPositiveInteger) {
-      // The prompt must name a positive integer decision number; anything
-      // else (fractions, signs, scientific notation) is refused up front
-      // instead of failing the create request later as a generic 400.
+    if (
+      pickedSupersedes !== undefined &&
+      pickedSupersedes !== null &&
+      pickedSupersedes !== "" &&
+      !isPositiveInteger
+    ) {
       showError(new Error("The superseded decision number must be a positive integer."));
       return;
     }
-    supersedes = pickedSupersedes.length > 0 && isPositiveInteger ? parsedSupersedes : undefined;
+    supersedes = isPositiveInteger ? parsedSupersedes : undefined;
+  } else {
+    documentTitle = trimmedTitle;
   }
 
   setActionsDisabled(true);
   try {
-    const created = await createDoc(kind, trimmedTitle, epic, feature, status, supersedes);
+    const created = await createDoc(kind, documentTitle, epic, feature, status, supersedes);
     if (typeof created?.path !== "string" || created.path.length === 0) {
       throw new Error("The server did not return a document path.");
     }
@@ -554,11 +574,34 @@ export function groupEntries(docs) {
   for (const group of GROUP_ORDER) {
     const entries = groups.get(group);
     if (entries && entries.length > 0) {
-      ordered.push([group, entries]);
+      // Decisions are listed by decision number, so the sidebar shows them in
+      // numeric order whatever order the server answered with (ticket 0032).
+      ordered.push([group, group === "decision" ? sortDecisions(entries) : entries]);
     }
   }
 
   return ordered;
+}
+
+// The decision entries of one group, in numeric decision-number order; an entry
+// that does not name a decision number sorts after the numbered ones.
+function sortDecisions(entries) {
+  const numberOf = (entry) => decisionNumberOf(entry?.path);
+  const compare = (a, b) => {
+    const left = numberOf(a);
+    const right = numberOf(b);
+    // Decision entries name the number the server assigned, so a null number is
+    // a malformed entry; keep it after the numbered decisions instead of
+    // silently sorting it first (ticket 0032, final closing review round).
+    if (left === null) {
+      return right === null ? 0 : 1;
+    }
+    if (right === null) {
+      return -1;
+    }
+    return left - right;
+  };
+  return [...entries].sort(compare);
 }
 
 // How many tickets the tree lists under the given epic directory.

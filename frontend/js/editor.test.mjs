@@ -283,8 +283,28 @@ test("statusKindOf maps backend-valid epic paths to the epic kind", () => {
 
 test("statusKindOf maps backend-valid numbered documents without a status control to null", () => {
   assert.equal(statusKindOf("sdlc/epics/0001-foundation/tickets/0001-project.md"), null);
-  assert.equal(statusKindOf("sdlc/decisions/0001-use-axum.md"), null);
   assert.equal(statusKindOf("sdlc/PRD.md"), null);
+});
+
+test("statusKindOf maps backend-valid decision paths to the decision kind", () => {
+  // Decisions carry the ADR status vocabulary (ticket 0032), so an open
+  // decision gets the status select of the toolbar.
+  assert.equal(statusKindOf("sdlc/decisions/0001-use-axum.md"), "decision");
+  assert.equal(statusKindOf("/sdlc/decisions/0001-use-axum.md"), "decision");
+  assert.equal(statusKindOf("sdlc/decisions/9999-use-axum.md"), "decision");
+});
+
+test("statusKindOf rejects backend-invalid decision paths", () => {
+  assert.equal(statusKindOf("sdlc/decisions/use-axum.md"), null);
+  assert.equal(statusKindOf("sdlc/decisions/0001-Use-Axum.md"), null);
+  assert.equal(statusKindOf("sdlc/decisions/0001.md"), null);
+  assert.equal(statusKindOf("sdlc/decisions/nested/0001-use-axum.md"), null);
+});
+
+test("the decision status vocabulary is the ADR statuses", () => {
+  // The decision vocabulary of ticket 0031 and the toolbar select of ticket
+  // 0032 (same pattern as the features of ticket 0030).
+  assert.deepEqual(STATUS_OPTIONS.decision, ["proposed", "accepted", "superseded"]);
 });
 
 test("statusKindOf rejects backend-invalid feature paths", () => {
@@ -398,6 +418,84 @@ test("a manual save of another document is not skipped while a status save is in
   assert.deepEqual(await manualSave, { skipped: false });
   deferred.resolve({ hash: "hash-3" });
   await statusSave;
+});
+
+// Loads a decision document into the editor state, like `loadFeatureDoc` does for
+// a feature (ticket 0032).
+function loadDecisionDoc(path, content, hash) {
+  state.current.path = path;
+  state.current.content = content;
+  state.current.savedContent = content;
+  state.current.hash = hash;
+  state.dirty = true;
+}
+
+// The read-only supersedes line of the open decision and the toolbar status
+// select it renders next to (ticket 0032).
+test("renderEditor shows the decision status select and the supersedes line", () => {
+  state.tree = {
+    layout_exists: true,
+    docs: [
+      {
+        kind: "decision",
+        path: "sdlc/decisions/0001-use-axum.md",
+        title: "0001: Use axum",
+        status: "accepted",
+        supersedes: null,
+      },
+      {
+        kind: "decision",
+        path: "sdlc/decisions/0002-use-redis.md",
+        title: "0002: Use redis",
+        status: "proposed",
+        supersedes: 1,
+      },
+    ],
+  };
+  loadDecisionDoc("sdlc/decisions/0002-use-redis.md", "---\nstatus: proposed\nsupersedes: 1\n---\n\n# 0002: Use redis\n", "hash-3");
+  renderEditor();
+  // The decision carries the ADR status vocabulary, so the toolbar select is
+  // rendered with it (ticket 0032).
+  const select = statusSelect();
+  assert.ok(select);
+  assert.equal(select.value, "proposed");
+  const line = editorElement.querySelector("#decision-supersedes");
+  assert.ok(line);
+  // The open decision supersedes decision 0001, which still exists, so the line
+  // is the plain read-only pointer.
+  assert.equal(line.textContent, "Supersedes: 0001");
+});
+
+test("the supersedes line marks a decision target that no longer exists", () => {
+  state.tree = {
+    layout_exists: true,
+    docs: [
+      {
+        kind: "decision",
+        path: "sdlc/decisions/0002-use-redis.md",
+        title: "0002: Use redis",
+        status: "proposed",
+        supersedes: 9,
+      },
+    ],
+  };
+  loadDecisionDoc("sdlc/decisions/0002-use-redis.md", "---\nstatus: proposed\nsupersedes: 9\n---\n\n# 0002: Use redis\n", "hash-4");
+  renderEditor();
+  const line = editorElement.querySelector("#decision-supersedes");
+  assert.ok(line);
+  assert.equal(line.textContent, "Supersedes: 0009 (missing)");
+});
+
+test("changing the status of a decision saves through the normal path and updates the select", async () => {
+  loadDecisionDoc("sdlc/decisions/0002-use-redis.md", "---\nstatus: proposed\nsupersedes: 1\n---\n\n# 0002: Use redis\n", "hash-3");
+  renderEditor();
+  assert.equal(statusSelect().value, "proposed");
+  const deferred = stubFetch();
+  const decisionStatusSave = changeStatus("accepted");
+  assert.equal(deferred.calls.length, 1);
+  deferred.resolve({ hash: "hash-4" });
+  await decisionStatusSave;
+  assert.equal(statusSelect().value, "accepted");
 });
 
 // A fetch stub that answers the first request with a save conflict and holds the

@@ -1,11 +1,15 @@
-//! The status vocabularies of the document kinds that carry a status (ticket
-//! 0030).
+//! The status vocabularies of the document kinds that carry a status (tickets
+//! 0030 and 0032).
 
-// A feature offers planned/in-progress/shipped; an epic planned/in-progress/done.
-// Every other kind has no status control at all.
+// A feature offers planned/in-progress/shipped; an epic planned/in-progress/done;
+// a decision the ADR statuses proposed/accepted/superseded (ticket 0031). Every
+// other kind has no status control at all. The decision vocabulary is
+// decision-only, so a status sent for another kind is a misplaced field the
+// server refuses instead of a status of that kind.
 export const STATUS_OPTIONS = {
   feature: ["planned", "in-progress", "shipped"],
   epic: ["planned", "in-progress", "done"],
+  decision: ["proposed", "accepted", "superseded"],
 };
 
 // Whether `value` is a lowercase kebab-case slug: alphanumeric words joined by
@@ -49,10 +53,12 @@ function isNumberedSlug(value) {
 // carries a backslash or a dot segment the server rejects never resolves to a
 // status kind here either, so a client-constructed path the server would refuse is
 // never treated as one the server would accept.
+function pathSegments(path) {
+  return String(path ?? "").replace(/^\//, "").split("/");
+}
+
 export function statusKindOf(path) {
-  const segments = String(path ?? "")
-    .replace(/^\//, "")
-    .split("/");
+  const segments = pathSegments(path);
   const invalidSegment = (segment) =>
     segment === ".." ||
     segment === "." ||
@@ -87,5 +93,35 @@ export function statusKindOf(path) {
       return "epic";
     }
   }
+  if (segments[0] === "sdlc" && segments[1] === "decisions" && segments.length === 3) {
+    // `sdlc/decisions/<number>-<slug>.md` is the whole decision; the decision
+    // file must be a four-digit-prefixed kebab-case name, exactly like the
+    // server's `is_numbered_slug`, and the decision is the kind that carries
+    // the ADR status vocabulary (ticket 0032).
+    if (file.endsWith(".md") && file.length > 4 && isNumberedSlug(file.slice(0, -3))) {
+      return "decision";
+    }
+  }
   return null;
+}
+
+// The decision number a decision path names, as a number without leading zeros,
+// or null for paths that are not decisions; the file name keeps the four-digit
+// padding while the pointer is stored without it (ticket 0031).
+export function decisionNumberOf(path) {
+  // The number of a decision only names a decision, so a path that is not a
+  // backend-valid decision path never resolves to a decision number (ticket
+  // 0032, final closing review round).
+  if (statusKindOf(path) !== "decision") {
+    return null;
+  }
+  const segments = pathSegments(path);
+  const file = segments[segments.length - 1] ?? "";
+  const stem = file.endsWith(".md") ? file.slice(0, -3) : file;
+  const dash = stem.indexOf("-");
+  const prefix = stem.slice(0, dash);
+  if (!isNumberedSlug(stem)) {
+    return null;
+  }
+  return Number(prefix);
 }
