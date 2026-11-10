@@ -11,6 +11,7 @@ use std::io;
 use thiserror::Error;
 use tracing::error;
 
+use crate::proposal::ProposalError;
 use crate::store::StoreError;
 
 /// Errors from starting the loopback server.
@@ -107,6 +108,20 @@ impl ApiError {
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "unsupported_media_type",
             "unsupported media type",
+        )
+    }
+
+    /// Builds the `500 Internal Server Error` error of a proposal accept that
+    /// stopped midway.
+    ///
+    /// The accept already applied some changes, so the response carries the
+    /// applied paths and the failing path beside the error envelope; see
+    /// [`crate::routes::proposals`].
+    pub fn partial_apply() -> Self {
+        Self::fixed(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "partial_apply",
+            "the proposal apply stopped midway",
         )
     }
 
@@ -207,6 +222,23 @@ impl From<StoreError> for ApiError {
                     "internal server error",
                 )
             }
+        }
+    }
+}
+
+impl From<ProposalError> for ApiError {
+    fn from(error: ProposalError) -> Self {
+        match error {
+            ProposalError::NotFound(_) => ApiError::not_found(),
+            ProposalError::Conflict => ApiError::conflict(),
+            ProposalError::InProgress => ApiError::conflict(),
+            ProposalError::Partial { .. } => ApiError::partial_apply(),
+            ProposalError::EmptyProposal
+            | ProposalError::InvalidPath(_)
+            | ProposalError::DuplicatePath(_)
+            | ProposalError::MissingTarget(_)
+            | ProposalError::Store(_) => ApiError::internal(&error),
+            ProposalError::DiffTask(_) => ApiError::internal(&error),
         }
     }
 }
@@ -413,6 +445,28 @@ mod tests {
             assert_eq!(api_error.status, status);
             assert_eq!(api_error.code, code);
         }
+    }
+
+    #[test]
+    fn proposal_errors_map_to_their_statuses_and_codes() {
+        let not_found = ApiError::from(ProposalError::NotFound("no-such".to_string()));
+
+        assert_eq!(not_found.status, StatusCode::NOT_FOUND);
+        assert_eq!(not_found.code, "not_found");
+
+        let conflict = ApiError::from(ProposalError::Conflict);
+
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+        assert_eq!(conflict.code, "conflict");
+
+        let partial = ApiError::from(ProposalError::Partial {
+            applied: vec!["sdlc/PRD.md".to_string()],
+            failed: "sdlc/features/export.md".to_string(),
+            reason: "the write failed".to_string(),
+        });
+
+        assert_eq!(partial.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(partial.code, "partial_apply");
     }
 
     #[test]

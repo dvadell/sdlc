@@ -4,6 +4,7 @@ pub mod assets;
 pub mod chat;
 pub mod config;
 pub mod docs;
+pub mod proposals;
 
 use axum::{
     Router,
@@ -27,6 +28,8 @@ pub fn router() -> Router<AppState> {
     let move_route = post(docs::move_doc).layer(body_limit);
     let scaffold_route = post(docs::scaffold).layer(body_limit);
     let chat_route = post(chat::chat).layer(DefaultBodyLimit::max(chat::MAX_CHAT_BODY_BYTES));
+    let accept_route = post(proposals::accept).layer(body_limit);
+    let reject_route = post(proposals::reject).layer(body_limit);
 
     // The exact create route is registered before the wildcard read route so
     // `POST /api/docs` never falls through to `/{*path}`.
@@ -38,4 +41,6 @@ pub fn router() -> Router<AppState> {
         .route("/api/scaffold", scaffold_route)
         .route("/api/docs/{*path}", docs_route.delete(docs::delete_doc))
         .route("/api/chat", chat_route)
+        .route("/api/proposals/{id}/accept", accept_route)
+        .route("/api/proposals/{id}/reject", reject_route)
 }
