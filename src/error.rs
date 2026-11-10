@@ -80,6 +80,18 @@ impl ApiError {
         Self::fixed(StatusCode::FORBIDDEN, "forbidden", "forbidden")
     }
 
+    /// Builds the `503 Service Unavailable` error for an unconfigured AI
+    /// endpoint.
+    ///
+    /// The chat UI uses this code to explain the missing setup variables.
+    pub fn ai_not_configured() -> Self {
+        Self::fixed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ai_not_configured",
+            "chat is not configured",
+        )
+    }
+
     /// Builds a `413 Payload Too Large` error.
     pub fn payload_too_large() -> Self {
         Self::fixed(

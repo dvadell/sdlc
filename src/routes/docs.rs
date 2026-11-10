@@ -400,7 +400,9 @@ pub(crate) async fn scaffold(
 /// Axum's own 413 body is plain text, so an oversized request is rebuilt as an
 /// [`ApiError`] to keep the API error shape uniform. Other body failures are
 /// client errors with a short message.
-fn json_body<T: DeserializeOwned>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
+pub(crate) fn json_body<T: DeserializeOwned>(
+    body: Result<Json<T>, JsonRejection>,
+) -> Result<T, ApiError> {
     match body {
         Ok(Json(request)) => Ok(request),
         Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {

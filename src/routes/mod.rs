@@ -1,6 +1,7 @@
 //! HTTP route modules.
 
 pub mod assets;
+pub mod chat;
 pub mod config;
 pub mod docs;
 
@@ -25,6 +26,7 @@ pub fn router() -> Router<AppState> {
     let create_route = post(docs::create_doc).layer(body_limit);
     let move_route = post(docs::move_doc).layer(body_limit);
     let scaffold_route = post(docs::scaffold).layer(body_limit);
+    let chat_route = post(chat::chat).layer(DefaultBodyLimit::max(chat::MAX_CHAT_BODY_BYTES));
 
     // The exact create route is registered before the wildcard read route so
     // `POST /api/docs` never falls through to `/{*path}`.
@@ -35,4 +37,5 @@ pub fn router() -> Router<AppState> {
         .route("/api/docs/move", move_route)
         .route("/api/scaffold", scaffold_route)
         .route("/api/docs/{*path}", docs_route.delete(docs::delete_doc))
+        .route("/api/chat", chat_route)
 }
