@@ -87,7 +87,7 @@ struct ValidatedChat {
     /// The focused document path.
     open_doc: DocPath,
     /// The attached paths that parsed as documents, missing ones skipped later.
-    attachments: Vec<String>,
+    attachments: Vec<DocPath>,
 }
 
 /// Validates the chat request, rejecting every shape the route refuses before
@@ -105,7 +105,7 @@ fn validate_request(request: &ChatRequest) -> Result<ValidatedChat, ApiError> {
             // instead of reaching the upstream.
             return Err(ApiError::bad_request());
         }
-        if turn.content.trim().chars().count() > MAX_MESSAGE_CHARS {
+        if turn.content.chars().count() > MAX_MESSAGE_CHARS {
             return Err(ApiError::bad_request());
         }
         history.push(Message {
@@ -117,10 +117,7 @@ fn validate_request(request: &ChatRequest) -> Result<ValidatedChat, ApiError> {
     let open_doc = DocPath::parse(&request.open_doc)?;
     let mut attachments = Vec::with_capacity(request.attachments.len());
     for attachment in &request.attachments {
-        if DocPath::parse(attachment).is_err() {
-            return Err(ApiError::bad_request());
-        }
-        attachments.push(attachment.clone());
+        attachments.push(DocPath::parse(attachment)?);
     }
 
     Ok(ValidatedChat {
@@ -143,13 +140,10 @@ async fn load_document(state: &AppState, path: &DocPath) -> Result<Document, Api
 }
 
 /// Loads the referenced attachments; a missing one is skipped by the prompt.
-async fn load_attachments(state: &AppState, raws: &[String]) -> Vec<Document> {
-    let mut documents = Vec::with_capacity(raws.len());
-    for raw in raws {
-        let Ok(path) = DocPath::parse(raw) else {
-            continue;
-        };
-        if let Ok(document) = state.store.read(&path).await {
+async fn load_attachments(state: &AppState, paths: &[DocPath]) -> Vec<Document> {
+    let mut documents = Vec::with_capacity(paths.len());
+    for path in paths {
+        if let Ok(document) = state.store.read(path).await {
             documents.push(document);
         }
     }
@@ -278,7 +272,7 @@ fn error_code(error: &ChatError) -> &'static str {
         ChatError::Network => "network",
         ChatError::Truncated => "truncated",
         ChatError::InvalidResponse { .. } => "invalid_response",
-        ChatError::UpstreamError { .. } => "upstream_error",
+        ChatError::UpstreamError { .. } => "upstream_stream_error",
         ChatError::InvalidBaseUrl { .. } => "invalid_base_url",
     }
 }
