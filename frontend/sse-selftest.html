@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>sdlc SSE reader self-test</title>
+    <link rel="stylesheet" href="/style.css">
+  </head>
+  <body>
+    <main id="sse-selftest">
+      <h1>SSE reader self-test</h1>
+      <p id="sse-selftest-status">Running the frame checks…</p>
+      <ol id="sse-selftest-results"></ol>
+      <button id="sse-selftest-run" type="button">Run again</button>
+    </main>
+    <!-- Browser-only page for the POST body SSE reader (ticket 0037); it is not
+         part of the app navigation and needs no npm to run. -->
+    <script type="module">
+      import { readSse, SseError, SseStoppedError } from "/js/sse.js";
+
+      const status = document.querySelector("#sse-selftest-status");
+      const results = document.querySelector("#sse-selftest-results");
+      const runButton = document.querySelector("#sse-selftest-run");
+
+      function byteChunks(text, size) {
+        const bytes = new TextEncoder().encode(text);
+        const chunks = [];
+        for (let index = 0; index < bytes.length; index += size) {
+          chunks.push(bytes.slice(index, index + size));
+        }
+        return chunks;
+      }
+
+      function sseResponse(chunks) {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            for (const chunk of chunks) {
+              controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
+            }
+            controller.close();
+          },
+        });
+        return { body: stream };
+      }
+
+      function neverEndingStream() {
+        const encoder = new TextEncoder();
+        return new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('event: delta\ndata: {"text": "Hello"}\n\n'));
+          },
+        });
+      }
+
+      async function collectEvents(response, signal) {
+        const events = [];
+        for await (const event of readSse(response, signal)) {
+          events.push(event);
+        }
+        return events;
+      }
+
+      // Stops a stream that never ends and reports whether the reader stopped
+      // with the distinct stopped outcome instead of failing.
+      async function stopStream() {
+        const controller = new AbortController();
+        const pending = (async () => {
+          for await (const event of readSse({ body: neverEndingStream() }, controller.signal)) {
+            // A stopped stream yields no events before it stops.
+          }
+        })();
+        setTimeout(() => controller.abort(), 25);
+        try {
+          await pending;
+          return { stopped: false };
+        } catch (error) {
+          return { stopped: error instanceof SseStoppedError };
+        }
+      }
+
+      function render(checks) {
+        results.replaceChildren();
+        for (const check of checks) {
+          const item = document.createElement("li");
+          item.textContent = check.ok ? `PASS: ${check.name}` : `FAIL: ${check.name}${check.detail ? ` — ${check.detail}` : ""}`;
+          results.appendChild(item);
+        }
+        const failed = checks.filter((check) => !check.ok).length;
+        status.textContent = failed === 0 ? `All ${checks.length} checks passed.` : `${failed} of ${checks.length} checks failed.`;
+      }
+
+      async function run() {
+        const checks = [];
+        const check = (name, ok, detail = "") => checks.push({ name, ok, detail });
+
+        const splitEvents = await collectEvents(
+          sseResponse(byteChunks('event: delta\ndata: {"text": "héllo wörld"}\n\n', 7)),
+        );
+        check(
+          "frames split at arbitrary byte boundaries still parse",
+          splitEvents.length === 1 && splitEvents[0].event === "delta" && splitEvents[0].data.text === "héllo wörld",
+          JSON.stringify(splitEvents),
+        );
+
+        const crlfEvents = await collectEvents(sseResponse(['event: delta\r\ndata: {"text": "Hello"}\r\n\r\n']));
+        check("CRLF frames parse", crlfEvents.length === 1 && crlfEvents[0].event === "delta");
+
+        const multiEvents = await collectEvents(sseResponse(['event: message\ndata: {\ndata:   "text": "Hello"\ndata: }\n\n']));
+        check("multi-line data joins with \\n", multiEvents.length === 1 && multiEvents[0].data.text === "Hello");
+
+        const finalEvents = await collectEvents(sseResponse(["event: done\ndata: {}"]));
+        check("a final frame without a trailing blank line is yielded", finalEvents.length === 1 && finalEvents[0].event === "done");
+
+        const commentEvents = await collectEvents(sseResponse([': keep-alive\nevent: delta\ndata: {"text": "Hi"}\n\n']));
+        check("comments are ignored and the event defaults to message", commentEvents.length === 1 && commentEvents[0].event === "delta");
+
+        const heartbeatEvents = await collectEvents(sseResponse([": keep-alive\n\n"]));
+        check("comment-only frames are ignored", heartbeatEvents.length === 0);
+
+        let jsonError = null;
+        try {
+          await collectEvents(sseResponse(["event: delta\ndata: not-json\n\n"]));
+        } catch (error) {
+          jsonError = error;
+        }
+        check("a JSON.parse failure surfaces a typed error", jsonError instanceof SseError && jsonError.code === "invalid_json");
+
+        const stopped = await stopStream();
+        check("abort stops reading and is distinguishable from a network failure", stopped.stopped);
+
+        render(checks);
+      }
+
+      runButton.addEventListener("click", () => {
+        runButton.disabled = true;
+        run().finally(() => {
+          runButton.disabled = false;
+        });
+      });
+
+      run();
+    </script>
+  </body>
+</html>

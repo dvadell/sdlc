@@ -381,7 +381,8 @@ Files:
 | `index.html` | Page skeleton: sidebar, editor area, chat panel |
 | `style.css` | All styles |
 | `js/main.js` | Startup, wiring, keyboard shortcuts |
-| `js/api.js` | `fetch` wrappers for every API route and the SSE reader |
+| `js/api.js` | `fetch` wrappers for every API route |
+| `js/sse.js` | The SSE reader for POST bodies: the `readSse()` async generator over a fetch body stream |
 | `js/state.js` | The shared `state` object |
 | `js/sidebar.js` | Document tree and create/rename/delete actions |
 | `js/editor.js` | Textarea, save, preview toggle |
