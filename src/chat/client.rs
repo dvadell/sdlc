@@ -74,20 +74,10 @@ pub enum ChatError {
 impl From<ProposalError> for ChatError {
     fn from(error: ProposalError) -> Self {
         let (code, message) = match &error {
-            ProposalError::InvalidPath(path) => (
-                "invalid_path",
-                format!("the proposed path is not an allowed document: {path}"),
-            ),
-            ProposalError::DuplicatePath(path) => {
-                ("duplicate_path", format!("duplicate proposed path: {path}"))
-            }
-            ProposalError::MissingTarget(path) => (
-                "missing_target",
-                format!("the proposed document is missing: {path}"),
-            ),
-            ProposalError::EmptyProposal => {
-                ("empty_proposal", "the proposal has no changes".to_string())
-            }
+            ProposalError::InvalidPath(_) => ("invalid_path", error.to_string()),
+            ProposalError::DuplicatePath(_) => ("duplicate_path", error.to_string()),
+            ProposalError::MissingTarget(_) => ("missing_target", error.to_string()),
+            ProposalError::EmptyProposal => ("empty_proposal", error.to_string()),
             ProposalError::Store(_)
             | ProposalError::DiffTask(_)
             | ProposalError::Conflict
@@ -369,5 +359,48 @@ mod tests {
             message,
             "the proposed path is not an allowed document: ../AGENTS.md"
         );
+    }
+
+    #[test]
+    fn a_proposal_refusal_maps_its_stable_code_and_message_for_every_refusal_kind() {
+        let cases: Vec<(ProposalError, &str, &str)> = vec![
+            (
+                ProposalError::InvalidPath("../AGENTS.md".to_string()),
+                "invalid_path",
+                "the proposed path is not an allowed document: ../AGENTS.md",
+            ),
+            (
+                ProposalError::DuplicatePath("sdlc/features/export.md".to_string()),
+                "duplicate_path",
+                "duplicate proposed path: sdlc/features/export.md",
+            ),
+            (
+                ProposalError::MissingTarget("sdlc/features/nope.md".to_string()),
+                "missing_target",
+                "the proposed document is missing: sdlc/features/nope.md",
+            ),
+            (
+                ProposalError::EmptyProposal,
+                "empty_proposal",
+                "the proposal has no changes",
+            ),
+            (
+                ProposalError::Conflict,
+                "proposal_error",
+                "the proposal conflicts with the current documents",
+            ),
+        ];
+
+        for (error, code, message) in cases {
+            let ChatError::Proposal {
+                code: mapped_code,
+                message: mapped_message,
+            } = ChatError::from(error)
+            else {
+                panic!("the refusal should carry the proposal refusal payload");
+            };
+            assert_eq!(mapped_code, code, "the refusal code should match");
+            assert_eq!(mapped_message, message, "the refusal message should match");
+        }
     }
 }

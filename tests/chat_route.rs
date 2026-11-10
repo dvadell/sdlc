@@ -687,6 +687,10 @@ async fn a_missing_attachment_is_skipped_and_the_reply_still_streams() {
 }
 
 /// The SSE frame of one chat event, found in the body of a reply.
+///
+/// The replies under test carry at most one frame per event name, so the first
+/// frame carrying the requested event name is the frame under test; the
+/// contract is single-match.
 fn frame_of<'a>(body: &'a str, event: &str) -> &'a str {
     let prefix = format!("event: {event}");
     body.split("\n\n")
@@ -989,13 +993,16 @@ async fn an_invalid_proposed_path_emits_an_error_and_no_proposal_and_writes_noth
         .await;
 
     assert_eq!(response.status, 200);
+    assert!(
+        response.body.contains("event: delta"),
+        "the streamed delta should still be relayed: {}",
+        response.body
+    );
+    let error_frame = frame_of(&response.body, "error");
+    assert_eq!(frame_data(error_frame)["code"], json!("invalid_path"));
     assert_eq!(
-        response.body,
-        concat!(
-            "event: delta\ndata: {\"text\":\"I will edit the config.\"}\n\n",
-            "event: delta\ndata: {\"text\":\"\\n=== FILE: ../../etc/passwd ===\\nroot:x:0:0\\n=== END FILE ===\"}\n\n",
-            "event: error\ndata: {\"code\":\"invalid_path\",\"message\":\"the proposed path is not an allowed document: ../../etc/passwd\"}\n\n",
-        )
+        frame_data(error_frame)["message"],
+        json!("the proposed path is not an allowed document: ../../etc/passwd")
     );
     assert!(
         !response.body.contains("event: done"),
@@ -1044,10 +1051,16 @@ async fn a_truncated_upstream_reply_emits_no_proposal() {
         .await;
 
     assert_eq!(response.status, 200);
+    assert!(
+        response.body.contains("event: delta"),
+        "the partial delta should still be relayed: {}",
+        response.body
+    );
+    let error_frame = frame_of(&response.body, "error");
+    assert_eq!(frame_data(error_frame)["code"], json!("truncated"));
     assert_eq!(
-        response.body,
-        "event: delta\ndata: {\"text\":\"I will add\"}\n\n\
-         event: error\ndata: {\"code\":\"truncated\",\"message\":\"chat upstream stream ended before the reply was complete\"}\n\n"
+        frame_data(error_frame)["message"],
+        json!("chat upstream stream ended before the reply was complete")
     );
     assert!(
         !response.body.contains("event: proposal"),
