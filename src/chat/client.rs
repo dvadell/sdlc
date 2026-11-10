@@ -155,7 +155,7 @@ impl ChatClient {
                 let timed_out = tokio::time::timeout(CHUNK_IDLE, response.chunk()).await;
                 let chunk = match timed_out {
                     Ok(result) => result.ok().flatten(),
-                    Err(_) => break,
+                    Err(_) => return Err(ChatError::Network),
                 };
                 let Some(chunk) = chunk else {
                     break;
