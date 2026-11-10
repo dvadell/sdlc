@@ -34,8 +34,18 @@ pub enum ChatError {
     Network,
 
     /// The upstream response could not be understood.
-    #[error("chat upstream returned an invalid response")]
-    InvalidResponse,
+    #[error("chat upstream returned an invalid response: {message}")]
+    InvalidResponse {
+        /// Short description of what could not be understood.
+        message: String,
+    },
+
+    /// The upstream reported an error inside a streamed response.
+    #[error("chat upstream returned an error: {message}")]
+    UpstreamError {
+        /// Short error text from the upstream error event.
+        message: String,
+    },
 
     /// The configured base URL already ends with the completions path.
     #[error("invalid AI base URL {base_url}: it must not end with /chat/completions")]
@@ -162,7 +172,9 @@ impl ChatClient {
                 };
                 body.extend_from_slice(&chunk);
             }
-            serde_json::from_slice::<Value>(&body).map_err(|_| ChatError::InvalidResponse)?;
+            serde_json::from_slice::<Value>(&body).map_err(|_| ChatError::InvalidResponse {
+                message: "the response body was not valid JSON".to_string(),
+            })?;
         }
 
         Ok(response)
@@ -287,7 +299,9 @@ mod tests {
                 snippet: "sk-secret-value".to_string(),
             },
             ChatError::Network,
-            ChatError::InvalidResponse,
+            ChatError::InvalidResponse {
+                message: "the response body was not valid JSON".to_string(),
+            },
             ChatError::InvalidBaseUrl {
                 base_url: "https://api.openai.com/v1".to_string(),
             },

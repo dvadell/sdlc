@@ -156,7 +156,7 @@ async fn send_maps_invalid_json_response_to_invalid_response() {
         .await
         .expect_err("an unparseable JSON body should be reported");
 
-    assert!(matches!(err, ChatError::InvalidResponse));
+    assert!(matches!(err, ChatError::InvalidResponse { .. }));
 }
 
 #[tokio::test]
