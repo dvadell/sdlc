@@ -59,6 +59,18 @@ pub struct AiConfig {
 }
 
 impl AiConfig {
+    /// Builds an AI endpoint configuration from its parts.
+    ///
+    /// Whether the result means "configured" is decided by the caller, so
+    /// half-built configurations are not representable here.
+    pub fn new(base_url: String, model: String, api_key: Option<ApiKey>) -> Self {
+        Self {
+            base_url,
+            model,
+            api_key,
+        }
+    }
+
     /// The base URL without a trailing slash.
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -68,13 +80,18 @@ impl AiConfig {
     pub fn model(&self) -> &str {
         &self.model
     }
+
+    /// The optional API key.
+    pub fn api_key(&self) -> Option<ApiKey> {
+        self.api_key.clone()
+    }
 }
 
 /// API key for the AI endpoint.
 ///
 /// `Debug` is implemented by hand rather than derived so the secret never
-/// reaches logs, errors or debug output. The secret is read by the chat client
-/// in later tickets (0005).
+/// reaches logs, errors or debug output.
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct ApiKey(String);
 
@@ -82,6 +99,11 @@ impl ApiKey {
     /// Wraps a raw secret in the newtype.
     pub fn new(secret: String) -> Self {
         Self(secret)
+    }
+
+    /// The raw secret; the caller must send it immediately and never log it.
+    pub fn secret(&self) -> &str {
+        &self.0
     }
 }
 

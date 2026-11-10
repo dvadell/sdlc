@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::chat::ChatClient;
 use crate::config::Config;
 use crate::store::DocStore;
 
@@ -15,9 +16,11 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// The document store rooted at the configured project directory.
     pub store: Arc<DocStore>,
-    /// Port the listener actually bound, which differs from `config.port()`
+    /// The port the listener actually bound, which differs from `config.port()`
     /// when the configured port is `0`.
     pub bound_port: u16,
+    /// The upstream chat client, built once at startup when AI is configured.
+    pub chat: Arc<ChatClient>,
 }
 
 impl AppState {
@@ -29,10 +32,18 @@ impl AppState {
         let store = DocStore::new(config.project_dir().to_path_buf())
             .expect("the configured project directory was canonicalized at startup");
 
+        let chat = match config.ai() {
+            Some(ai) => Arc::new(ChatClient::new(ai).expect(
+                "the AI base URL must not end with /chat/completions",
+            )),
+            None => Arc::new(ChatClient::unconfigured()),
+        };
+
         Self {
             config: Arc::new(config),
             store: Arc::new(store),
             bound_port,
+            chat,
         }
     }
 }

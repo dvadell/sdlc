@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chat;
 pub mod config;
 pub mod error;
 pub mod guard;
