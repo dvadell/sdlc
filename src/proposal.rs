@@ -1,19 +1,24 @@
-//! Proposed file writes and deletes turned into reviewable proposals (ticket 0041).
+//! Proposed file writes and deletes turned into reviewable proposals (tickets
+//! 0041 and 0042).
 //!
 //! The block parser turns a model reply into [`Block`]s; this module turns the
 //! accepted blocks into a [`Proposal`] that carries the classified change, the
 //! content hash the proposal was based on and the unified diff a reviewer reads
-//! before accepting.
+//! before accepting, and applies or discards that proposal on accept or reject.
 
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use similar::TextDiff;
 use thiserror::Error;
 
 use crate::chat::Block;
-use crate::store::{DocPath, DocStore, StoreError};
+use crate::store::{DocKind, DocPath, DocStore, Expectation, StoreError};
 use uuid::Uuid;
+
+/// The project-relative path of the PRD the feature index is rendered into.
+const PRD_PATH: &str = "sdlc/PRD.md";
 
 /// How many context lines the unified diff keeps around each change.
 const DIFF_CONTEXT_LINES: usize = 3;
@@ -44,6 +49,44 @@ pub enum ProposalError {
     /// The diff task failed while the proposal was built.
     #[error("the proposal diff task failed: {0}")]
     DiffTask(#[from] tokio::task::JoinError),
+
+    /// The proposal no longer matches the documents it was based on, so it
+    /// cannot be applied until it is regenerated.
+    #[error("the proposal conflicts with the current documents")]
+    Conflict,
+
+    /// The proposal id is not known to this service.
+    #[error("the proposal is not known: {0}")]
+    NotFound(String),
+
+    /// Another accept of the same proposal is already applying it.
+    #[error("the proposal accept is already in progress")]
+    InProgress,
+
+    /// The apply stopped midway: the changes before the failure were applied and
+    /// the failing change is reported, so the accept never pretends to be atomic.
+    #[error(
+        "the proposal apply stopped midway: applied {applied:?}, failed {failed}, reason {reason}"
+    )]
+    Partial {
+        /// The paths that were applied before the failure, in block order.
+        applied: Vec<String>,
+        /// The path of the change that failed.
+        failed: String,
+        /// The reason the failing change was not applied.
+        reason: String,
+    },
+}
+
+/// The outcome of an accepted proposal: what was applied and the index warnings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptReport {
+    /// The paths that were written or deleted, in block order.
+    pub applied: Vec<String>,
+    /// Warnings from refreshing the PRD feature index after the apply; empty
+    /// when no feature was written or deleted, and when the proposal carried
+    /// the PRD itself and the refresh was skipped.
+    pub warnings: Vec<String>,
 }
 
 /// The kind of change a proposal asks for.
@@ -94,6 +137,9 @@ pub struct Proposal {
 pub struct ProposalService {
     store: Arc<DocStore>,
     proposals: Mutex<std::collections::HashMap<String, Proposal>>,
+    /// The proposal ids an accept is currently applying, so a second accept of
+    /// the same proposal fails while the first one runs.
+    accepts: Mutex<std::collections::HashSet<String>>,
 }
 
 impl ProposalService {
@@ -103,6 +149,7 @@ impl ProposalService {
         Self {
             store,
             proposals: Mutex::new(std::collections::HashMap::new()),
+            accepts: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -203,6 +250,196 @@ impl ProposalService {
             .get(id)
             .cloned()
     }
+
+    /// Applies a proposal the person accepted, or reports why it cannot be
+    /// applied (ticket 0042).
+    ///
+    /// Every change is re-checked against the content the store holds now: a
+    /// `Modify` or `Delete` must still hash to the proposal's base hash and a
+    /// `Create` must still be missing, otherwise the accept answers
+    /// [`ProposalError::Conflict`] and writes nothing at all. The changes that
+    /// pass are applied in block order through the store's atomic write/delete
+    /// operations, which never write without a passing expectation, so a stale
+    /// file cannot be clobbered mid-apply.
+    ///
+    /// A write that fails stops the apply and answers [`ProposalError::Partial`]
+    /// with the paths applied so far and the failing path, and the proposal is
+    /// kept, so the person can inspect or reject it until it is regenerated.
+    ///
+    /// A successful apply removes the proposal and refreshes the PRD feature
+    /// index when a feature was written or deleted; a proposal that carries the
+    /// PRD itself skips that refresh, so the proposed PRD content wins.
+    pub async fn accept(
+        &self,
+        id: &str,
+        store: &Arc<DocStore>,
+    ) -> Result<AcceptReport, ProposalError> {
+        {
+            let mut accepts = self
+                .accepts
+                .lock()
+                .expect("the proposal accept lock should not be poisoned");
+            if accepts.contains(id) {
+                return Err(ProposalError::InProgress);
+            }
+            accepts.insert(id.to_string());
+        }
+
+        let outcome = self.apply_proposal(id, store).await;
+
+        self.accepts
+            .lock()
+            .expect("the proposal accept lock should not be poisoned")
+            .remove(id);
+
+        outcome
+    }
+
+    /// Discards a proposal without touching the documents on disk (ticket 0042).
+    ///
+    /// Unknown ids are refused with [`ProposalError::NotFound`]; a known
+    /// proposal is dropped from the in-memory map and the documents on disk are
+    /// left alone.
+    pub async fn reject(&self, id: &str) -> Result<(), ProposalError> {
+        let mut proposals = self
+            .proposals
+            .lock()
+            .expect("the proposal map lock should not be poisoned");
+        if proposals.remove(id).is_none() {
+            return Err(ProposalError::NotFound(id.to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// Applies one proposal that was accepted, after the accept guard was taken.
+    ///
+    /// The proposal is re-checked change by change, then applied in block order;
+    /// see [`ProposalService::accept`] for the conflict and partial rules.
+    async fn apply_proposal(
+        &self,
+        id: &str,
+        store: &Arc<DocStore>,
+    ) -> Result<AcceptReport, ProposalError> {
+        let proposal = self
+            .proposals
+            .lock()
+            .expect("the proposal map lock should not be poisoned")
+            .get(id)
+            .cloned()
+            .ok_or_else(|| ProposalError::NotFound(id.to_string()))?;
+
+        // Re-check every change before touching the disk, so a stale proposal
+        // never writes anything at all.
+        for change in &proposal.changes {
+            self.check_change(store, change).await?;
+        }
+
+        let mut applied: Vec<String> = Vec::new();
+        for change in &proposal.changes {
+            if let Err(error) = self.apply_change(store, change).await {
+                // No transaction exists: report what was applied and stop, and
+                // keep the proposal so the person can inspect or reject it.
+                return Err(ProposalError::Partial {
+                    applied: applied.clone(),
+                    failed: path_string(&change.path),
+                    reason: error.to_string(),
+                });
+            }
+            applied.push(path_string(&change.path));
+        }
+
+        let warnings = self.feature_refresh_warnings_for(proposal, store).await;
+
+        self.proposals
+            .lock()
+            .expect("the proposal map lock should not be poisoned")
+            .remove(id);
+
+        Ok(AcceptReport { applied, warnings })
+    }
+
+    /// Re-checks one proposal change against the current store content.
+    ///
+    /// A `Modify` or `Delete` must still hash to the proposal's base hash, and
+    /// a `Create` must still be missing; anything else is a conflict, so the
+    /// accept writes nothing until the proposal is regenerated.
+    async fn check_change(
+        &self,
+        store: &Arc<DocStore>,
+        change: &Change,
+    ) -> Result<(), ProposalError> {
+        match change.action {
+            Action::Create => match store.read(&change.path).await {
+                Ok(_) => Err(ProposalError::Conflict),
+                Err(StoreError::NotFound(_)) => Ok(()),
+                Err(error) => Err(error.into()),
+            },
+            Action::Modify | Action::Delete => {
+                let document = match store.read(&change.path).await {
+                    Ok(document) => document,
+                    // The file vanished after the proposal was built, so the
+                    // proposal is stale and must not be applied.
+                    Err(StoreError::NotFound(_)) => return Err(ProposalError::Conflict),
+                    Err(error) => return Err(error.into()),
+                };
+                if document.hash != change.base_hash.as_deref().unwrap_or_default() {
+                    return Err(ProposalError::Conflict);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Applies one already-checked change through the store's atomic operations.
+    async fn apply_change(
+        &self,
+        store: &Arc<DocStore>,
+        change: &Change,
+    ) -> Result<(), ProposalError> {
+        match change.action {
+            Action::Create => {
+                let content = change.new_content.clone().unwrap_or_default();
+                store
+                    .write(&change.path, &content, &Expectation::Missing)
+                    .await?;
+            }
+            Action::Modify => {
+                let content = change.new_content.clone().unwrap_or_default();
+                let base_hash = change.base_hash.clone().unwrap_or_default();
+                store
+                    .write(&change.path, &content, &Expectation::Existing(base_hash))
+                    .await?;
+            }
+            Action::Delete => {
+                store.delete(&change.path).await.map(|_| ())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Refreshes the PRD feature index after a successful apply, unless the
+    /// proposal carried the PRD itself and the proposed content must win.
+    async fn feature_refresh_warnings_for(
+        &self,
+        proposal: Proposal,
+        store: &Arc<DocStore>,
+    ) -> Vec<String> {
+        if proposal_touches_prd(&proposal) {
+            // The proposal replaced the PRD, so its content is the proposal.
+            return Vec::new();
+        }
+        if proposal
+            .changes
+            .iter()
+            .any(|change| change_kind(&change.path) == Some(DocKind::Feature))
+        {
+            return store.refresh_feature_index().await;
+        }
+
+        Vec::new()
+    }
 }
 
 /// The path a block acts on, as written between the markers.
@@ -210,6 +447,31 @@ fn block_path(block: &Block) -> &str {
     match block {
         Block::Write { path, .. } | Block::Delete { path } => path,
     }
+}
+
+/// The project-relative path of a change, as a string for reports and results.
+fn path_string(path: &DocPath) -> String {
+    path.as_path().to_string_lossy().into_owned()
+}
+
+/// Whether a change acts on the PRD itself, which the proposal may propose
+/// verbatim instead of refreshing through the feature index.
+fn is_prd_change(path: &DocPath) -> bool {
+    path.as_path() == Path::new(PRD_PATH)
+}
+
+/// The kind group a change acts on, or `None` for paths that are not documents.
+fn change_kind(path: &DocPath) -> Option<crate::store::DocKind> {
+    crate::store::layout::kind(path.as_path())
+}
+
+/// Whether the proposal carries its own PRD change, so the proposed content
+/// must win over a feature-index refresh.
+fn proposal_touches_prd(proposal: &Proposal) -> bool {
+    proposal
+        .changes
+        .iter()
+        .any(|change| is_prd_change(&change.path))
 }
 
 /// Computes the unified diff of `base` and `new` for one document.
@@ -234,15 +496,32 @@ mod tests {
     use super::*;
     use crate::chat::Block;
     use crate::store::{DocStore, content_hash};
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    /// The starter PRD of a scaffolded project, with the marked region still empty.
+    const PRD_WITH_MARKERS: &str = "# Product Requirements Document\n\n## Purpose\n\nTODO: write the purpose of this document in one or two short paragraphs.\n\n<!-- sdlc:feature-index:start -->\n<!-- sdlc:feature-index:end -->\n";
+
     async fn service_in_temp() -> (TempDir, ProposalService) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(DocStore::new(dir.path().to_path_buf()).expect("store"));
-        let service = ProposalService::new(store);
+        let (dir, _store, service) = service_in_temp_with_store().await;
 
         (dir, service)
+    }
+
+    async fn service_in_temp_with_store() -> (TempDir, Arc<DocStore>, ProposalService) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(DocStore::new(dir.path().to_path_buf()).expect("store"));
+        let service = ProposalService::new(store.clone());
+
+        (dir, store, service)
+    }
+
+    fn write_file(dir: &TempDir, relative: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.path().join(relative);
+        std::fs::create_dir_all(path.parent().expect("the parent dir")).expect("parent dir");
+        std::fs::write(&path, content).expect("write the document");
+        path
     }
 
     fn write_block(path: &str, content: &str) -> Block {
@@ -515,5 +794,290 @@ mod tests {
         assert_eq!(change.action, Action::Modify);
         assert!(change.diff.contains("+line 250 changed"));
         assert!(change.diff.contains("-line 250"));
+    }
+
+    #[tokio::test]
+    async fn accept_applies_creates_modifies_and_deletes() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        feature_file(&dir, "export.md", "# Export\n");
+        feature_file(&dir, "old.md", "# Old\n");
+        let blocks = [
+            write_block("sdlc/features/export.md", "# Exported\n"),
+            write_block("sdlc/features/v2-api.md", "# V2 API\n"),
+            delete_block("sdlc/features/old.md"),
+        ];
+
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        let report = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect("the accept");
+
+        assert_eq!(
+            report.applied,
+            vec![
+                "sdlc/features/export.md".to_string(),
+                "sdlc/features/v2-api.md".to_string(),
+                "sdlc/features/old.md".to_string(),
+            ]
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
+                .expect("read the feature"),
+            "# Exported\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/features/v2-api.md"))
+                .expect("read the feature"),
+            "# V2 API\n"
+        );
+        assert!(
+            !dir.path().join("sdlc/features/old.md").exists(),
+            "the deleted feature must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_of_a_stale_hash_writes_nothing_and_keeps_the_proposal() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        feature_file(&dir, "export.md", "# Export\n");
+        let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "# Changed externally\n",
+        )
+        .expect("rewrite the feature");
+
+        let error = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect_err("the accept");
+
+        assert!(matches!(error, ProposalError::Conflict));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
+                .expect("read the feature"),
+            "# Changed externally\n"
+        );
+        assert!(service.get(&proposal.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn accept_of_a_create_whose_target_appeared_is_a_conflict() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("feature dir");
+        let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        std::fs::write(dir.path().join("sdlc/features/export.md"), "# External\n")
+            .expect("write the feature");
+
+        let error = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect_err("the accept");
+
+        assert!(matches!(error, ProposalError::Conflict));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
+                .expect("read the feature"),
+            "# External\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_of_a_delete_of_a_changed_file_writes_nothing() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        feature_file(&dir, "export.md", "# Export\n");
+        let proposal = service
+            .create(&[delete_block("sdlc/features/export.md")])
+            .await
+            .expect("the proposal");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "# Changed externally\n",
+        )
+        .expect("rewrite the feature");
+
+        let error = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect_err("the accept");
+
+        assert!(matches!(error, ProposalError::Conflict));
+        assert!(
+            dir.path().join("sdlc/features/export.md").exists(),
+            "a conflicted delete must not remove the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_after_the_file_was_deleted_is_a_conflict() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        feature_file(&dir, "export.md", "# Export\n");
+        let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        std::fs::remove_file(dir.path().join("sdlc/features/export.md")).expect("remove");
+
+        let error = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect_err("the accept");
+
+        assert!(matches!(error, ProposalError::Conflict));
+    }
+
+    #[tokio::test]
+    async fn partial_apply_reports_the_applied_and_the_failing_path() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        write_file(&dir, "sdlc/PRD.md", "# Product Requirements Document\n");
+        feature_file(&dir, "gamma.md", "# Gamma\n");
+        let blocks = [
+            write_block("sdlc/PRD.md", "# Fresh PRD\n"),
+            write_block("sdlc/features/gamma.md", "# Gamma v2\n"),
+        ];
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        let feature_dir = dir.path().join("sdlc/features");
+        std::fs::set_permissions(&feature_dir, std::fs::Permissions::from_mode(0o500))
+            .expect("make the feature dir read-only");
+        let error = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect_err("the accept");
+        std::fs::set_permissions(&feature_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore the feature dir");
+
+        let ProposalError::Partial {
+            applied,
+            failed,
+            reason,
+        } = error
+        else {
+            panic!("the accept should be partial, got {error:?}");
+        };
+
+        assert_eq!(applied, vec!["sdlc/PRD.md".to_string()]);
+        assert_eq!(failed, "sdlc/features/gamma.md");
+        assert!(!reason.is_empty());
+
+        // The first change was applied and the second was not; the proposal is
+        // kept, so it can still be inspected or rejected.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/PRD.md")).expect("read the prd"),
+            "# Fresh PRD\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/features/gamma.md"))
+                .expect("read the feature"),
+            "# Gamma\n"
+        );
+        assert!(service.get(&proposal.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn accept_refreshes_the_prd_feature_index_for_a_feature_change() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("feature dir");
+        write_file(&dir, "sdlc/PRD.md", PRD_WITH_MARKERS);
+        let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
+
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        let report = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect("the accept");
+
+        assert_eq!(report.applied, vec!["sdlc/features/export.md".to_string()]);
+
+        let document = store
+            .read(&DocPath::parse("sdlc/PRD.md").expect("the prd path is valid"))
+            .await
+            .expect("read the prd");
+        assert!(
+            document
+                .content
+                .contains("- [Export](features/export.md) — planned"),
+            "the refreshed index must list the accepted feature, got {}",
+            document.content
+        );
+        assert!(
+            document
+                .content
+                .contains(crate::store::index::FEATURE_INDEX_START),
+            "the refreshed index must keep the feature index markers"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_keeps_an_explicit_prd_change_instead_of_refreshing() {
+        let (dir, store, service) = service_in_temp_with_store().await;
+        write_file(&dir, "sdlc/PRD.md", PRD_WITH_MARKERS);
+        let proposed = "# Product Requirements Document\n\n## Purpose\n\nWrite the purpose.\n\n<!-- sdlc:feature-index:start -->\n<!-- sdlc:feature-index:end -->\n";
+        let blocks = [write_block("sdlc/PRD.md", proposed)];
+
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        let report = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect("the accept");
+
+        assert!(report.warnings.is_empty());
+
+        let document = store
+            .read(&DocPath::parse("sdlc/PRD.md").expect("the prd path is valid"))
+            .await
+            .expect("read the prd");
+        assert_eq!(document.content, proposed);
+    }
+
+    #[tokio::test]
+    async fn reject_does_not_touch_disk_and_drops_the_proposal() {
+        let (dir, _store, service) = service_in_temp_with_store().await;
+        feature_file(&dir, "export.md", "# Export\n");
+        let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        assert!(service.get(&proposal.id).is_some());
+
+        service.reject(&proposal.id).await.expect("the reject");
+
+        assert!(service.get(&proposal.id).is_none());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sdlc/features/export.md"))
+                .expect("read the feature"),
+            "# Export\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_of_an_unknown_id_is_not_found() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+
+        let error = service
+            .reject("no-such-proposal")
+            .await
+            .expect_err("the reject");
+
+        assert!(matches!(error, ProposalError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn a_second_accept_of_the_same_id_fails_cleanly() {
+        let (_dir, store, service) = service_in_temp_with_store().await;
+        std::fs::create_dir_all(_dir.path().join("sdlc/features")).expect("feature dir");
+        let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
+        let proposal = service.create(&blocks).await.expect("the proposal");
+        let report = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect("the accept");
+        assert_eq!(report.applied, vec!["sdlc/features/export.md".to_string()]);
+
+        let error = service
+            .accept(&proposal.id, &store)
+            .await
+            .expect_err("the second accept");
+
+        assert!(matches!(error, ProposalError::NotFound(_)));
     }
 }
