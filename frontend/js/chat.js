@@ -249,14 +249,16 @@ function renderChecklist() {
 export function availableAttachments() {
   const openPath = state.current?.path ?? null;
   const paths = [];
+  const seen = new Set();
   for (const entry of state.tree?.docs ?? []) {
     const path = entry?.path;
     if (typeof path !== "string" || path.length === 0) {
       continue;
     }
-    if (path === openPath || paths.includes(path)) {
+    if (path === openPath || seen.has(path)) {
       continue;
     }
+    seen.add(path);
     paths.push(path);
   }
   return paths;
@@ -442,9 +444,17 @@ export async function sendChat() {
   }
 
   const { sent, dropped } = planAttachments(docPath);
-  const content = dropped.length > 0 ? `${text}\n\n${attachmentDropNote(dropped)}` : text;
+  // Clean the paths that no longer exist out of the stored attachments, so the
+  // same vanished path is not dropped again on a later turn (ticket 0039).
+  for (const path of dropped) {
+    removeAttachment(path);
+  }
 
-  state.chat.messages.push({ role: "user", content });
+  const userEntry = { role: "user", content: text };
+  if (dropped.length > 0) {
+    userEntry.note = attachmentDropNote(dropped);
+  }
+  state.chat.messages.push(userEntry);
   const assistantEntry = { role: "assistant", content: "", streamId: ++streamRequestId, complete: false };
   state.chat.messages.push(assistantEntry);
   if (input) {
@@ -507,7 +517,11 @@ function renderMessage(entry) {
   if (kind === "assistant" && entry.complete) {
     renderAssistantMarkdown(entry, body);
   } else {
-    body.textContent = String(entry.content ?? "");
+    let content = String(entry.content ?? "");
+    if (kind === "user" && typeof entry.note === "string" && entry.note.length > 0) {
+      content = `${content}\n\n${entry.note}`;
+    }
+    body.textContent = content;
   }
   if (kind === "assistant") {
     element.dataset.chatStream = String(entry.streamId ?? "");

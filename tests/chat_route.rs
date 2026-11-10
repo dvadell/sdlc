@@ -635,8 +635,20 @@ async fn chat_with_attachments_sends_the_open_document_first_and_every_attachmen
 #[tokio::test]
 async fn a_missing_attachment_is_skipped_and_the_reply_still_streams() {
     let mock_server = MockServer::start().await;
+    let open = Document {
+        path: DocPath::parse("sdlc/features/export.md")
+            .expect("the open document path should be valid"),
+        content: "# Export\n".to_string(),
+        hash: content_hash(b"# Export\n"),
+    };
+    let messages = build(&open, &[], vec![]);
     let mock = Mock::given(method("POST"))
         .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "model": "gpt-4o",
+            "stream": true,
+            "messages": [ { "role": "system", "content": messages[0].content.clone() } ],
+        })))
         .respond_with(
             ResponseTemplate::new(200).set_body_raw(
                 b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
@@ -667,7 +679,8 @@ async fn a_missing_attachment_is_skipped_and_the_reply_still_streams() {
         .await;
 
     // The missing attachment is skipped by the prompt builder, so the reply
-    // still streams instead of failing the turn.
+    // still streams instead of failing the turn; the body matcher asserts the
+    // prompt carried only the open document and not the missing attachment.
     assert_eq!(response.status, 200);
     assert!(response.body.contains("event: done"));
     mock_server.verify().await;

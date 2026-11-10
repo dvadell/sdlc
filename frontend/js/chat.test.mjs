@@ -350,8 +350,23 @@ test("a deleted attachment is dropped with a visible note and not sent", async (
   const body = JSON.parse(fetchCalls[0].options.body);
   assert.deepEqual(body.attachments, []);
   const userTurn = state.chat.messages.find((entry) => entry.role === "user");
-  assert.ok(userTurn.content.includes("sdlc/features/gone.md"));
-  assert.ok(userTurn.content.includes("left out of the context"));
+  assert.ok(userTurn.note.includes("sdlc/features/gone.md"));
+  assert.ok(userTurn.note.includes("left out of the context"));
+});
+
+test("multiple deleted attachments are dropped with the plural note", async () => {
+  state.chat.attachments = ["sdlc/features/gone-1.md", "sdlc/features/gone-2.md"];
+  state.tree = { docs: [{ kind: "feature", path: "sdlc/features/export.md", title: "Export" }] };
+  inputElement.value = "Hello panel";
+  await sendChat();
+
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.deepEqual(body.attachments, []);
+  const userTurn = state.chat.messages.find((entry) => entry.role === "user");
+  assert.ok(userTurn.note.includes("sdlc/features/gone-1.md"));
+  assert.ok(userTurn.note.includes("sdlc/features/gone-2.md"));
+  assert.ok(userTurn.note.includes("no longer exist and were left out"));
+  assert.deepEqual(state.chat.attachments, []);
 });
 
 test("the open document chip is fixed and attachment chips can be removed", () => {
