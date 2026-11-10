@@ -22,6 +22,17 @@ const ASSISTANT_LABEL = "AI";
 const ERROR_LABEL = "Error";
 const SCROLL_BOTTOM_THRESHOLD = 40;
 
+// Updates the body of the streaming bubble in place, so a long reply streams
+// into one bubble without rebuilding the whole transcript per delta.
+function updateStreamingBubble(entry) {
+  const list = document.querySelector("#chat-messages");
+  const bubble = list?.querySelector(`[data-chat-stream="${entry.streamId}"]`);
+  const body = bubble?.querySelector(".chat-message-body");
+  if (body) {
+    body.textContent = String(entry.content ?? "");
+  }
+}
+
 // The AI reply in flight: POST the conversation, relay the SSE stream and turn
 // the three outcomes (`done`, `error`, connection loss / stop) into transcript
 // updates. Returns `{ stopped }` for a stop and `{ error }` for a failure.
@@ -33,19 +44,20 @@ async function runAssistantStream(docPath, assistantEntry) {
     let failure = null;
     for await (const event of readSse(response, controller.signal)) {
       if (event.event === "delta") {
+        // Only the reply that owns the panel renders; a stale stream may still
+        // deliver a buffered chunk after a newer reply started, and that chunk
+        // must not touch the transcript.
         if (assistantEntry.streamId === streamRequestId) {
           assistantEntry.content += event.data?.text ?? "";
+          updateStreamingBubble(assistantEntry);
+          autoScroll();
         }
-        renderChat();
-        autoScroll();
       } else if (event.event === "error") {
         failure = event.data ?? null;
       }
     }
     if (failure) {
-      const error = new Error(failure.message ?? "The AI reply failed.");
-      error.code = failure.code ?? "upstream_error";
-      throw error;
+      throw new Error(failure.message ?? "The AI reply failed.");
     }
     assistantEntry.complete = true;
     return { stopped: false, error: null };
@@ -69,7 +81,9 @@ async function postChat(docPath, signal) {
   const history = state.chat.messages
     .filter(
       (entry) =>
-        (entry.role === "user" || entry.role === "assistant") && typeof entry.content === "string",
+        (entry.role === "user" || entry.role === "assistant") &&
+        typeof entry.content === "string" &&
+        entry.content.length > 0,
     )
     .map((entry) => ({ role: entry.role, content: entry.content }));
   const response = await fetch("/api/chat", {
@@ -179,22 +193,21 @@ export function renderChat() {
   renderNotice();
 }
 
-// Binds the composer once per element instance; the elements live in the static
-// shell, so the flags only guard against re-binding on a replaced element.
-let inputBound = false;
+// Binds the composer once per element instance; the flags track the element
+// they are set on, so a replaced element is bound again.
 function bindInput(input) {
-  if (input && !inputBound) {
-    inputBound = true;
-    input.addEventListener("keydown", onInputKeydown);
-  }
-}
-
-let composerBound = false;
-function bindComposer(element) {
-  if (composerBound || !element) {
+  if (!input || input.__chatInputBound) {
     return;
   }
-  composerBound = true;
+  input.__chatInputBound = true;
+  input.addEventListener("keydown", onInputKeydown);
+}
+
+function bindComposer(element) {
+  if (!element || element.__chatComposerBound) {
+    return;
+  }
+  element.__chatComposerBound = true;
   const send = element.querySelector("#chat-send");
   const stop = element.querySelector("#chat-stop");
   if (send) {
@@ -248,7 +261,6 @@ export async function sendChat() {
   autoScroll();
 
   const outcome = await runAssistantStream(docPath, assistantEntry);
-  state.chat.streaming = false;
   renderChat();
   autoScroll();
   if (outcome.error) {
@@ -265,35 +277,46 @@ export async function sendChat() {
 // one error bubble of the transcript; the panel never leaves the spinner state.
 function appendError(error) {
   let content = "The AI reply failed.";
-  let code = "";
   if (error instanceof ApiError) {
     content = error.message;
-    code = error.code;
   } else if (error && typeof error === "object" && typeof error.message === "string") {
     content = error.message;
-    code = error.code ?? "";
   } else if (error) {
     content = String(error);
   }
-  state.chat.messages.push({ role: "error", content, code });
+  state.chat.messages.push({ role: "error", content });
 }
 
 // The bubble of one transcript entry; user and error bubbles are text surfaces,
 // assistant bubbles are plain while streaming and sanitized Markdown once the
 // reply completed.
 function renderMessage(entry) {
-  const kind = entry.role === "user" ? "user" : entry.role === "assistant" ? "assistant" : "error";
+  let kind = "error";
+  if (entry.role === "user") {
+    kind = "user";
+  } else if (entry.role === "assistant") {
+    kind = "assistant";
+  }
   const element = document.createElement("div");
   element.className = `chat-message chat-message-${kind}`;
   const label = document.createElement("span");
   label.className = "chat-message-label";
-  label.textContent = kind === "user" ? USER_LABEL : kind === "assistant" ? ASSISTANT_LABEL : ERROR_LABEL;
+  let labelText = ERROR_LABEL;
+  if (kind === "user") {
+    labelText = USER_LABEL;
+  } else if (kind === "assistant") {
+    labelText = ASSISTANT_LABEL;
+  }
+  label.textContent = labelText;
   const body = document.createElement("div");
   body.className = "chat-message-body";
   if (kind === "assistant" && entry.complete) {
     renderAssistantMarkdown(entry, body);
   } else {
     body.textContent = String(entry.content ?? "");
+  }
+  if (kind === "assistant") {
+    element.dataset.chatStream = String(entry.streamId ?? "");
   }
   element.appendChild(label);
   element.appendChild(body);

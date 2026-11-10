@@ -294,7 +294,7 @@ body {
   border-top: 1px solid #e0e0e0;
 }
 
-#chat-hint {
+.chat-hint {
   margin: 0;
   color: #666666;
   font-size: 0.85rem;
@@ -348,18 +348,18 @@ body {
 
 /* The setup guidance shown while AI is not configured; the panel itself stays
    visible, only this replaces the composer (ticket 0038 gotcha). */
-#chat-setup {
+.chat-setup {
   padding: 1rem;
   color: #666666;
   font-size: 0.9rem;
 }
 
-#chat-setup-list {
+.chat-setup-list {
   margin: 0.5rem 0;
   padding-left: 1.2rem;
 }
 
-#chat-setup code {
+.chat-setup code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
 }

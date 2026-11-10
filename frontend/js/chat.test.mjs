@@ -277,10 +277,7 @@ test("enter sends the composer text and shift+enter keeps the newline", async ()
   assert.equal(fetchCalls[0].url, "/api/chat");
   assert.equal(fetchCalls[0].options.method, "POST");
   const body = JSON.parse(fetchCalls[0].options.body);
-  assert.deepEqual(body.messages, [
-    { role: "user", content: "Hello panel" },
-    { role: "assistant", content: "" },
-  ]);
+  assert.deepEqual(body.messages, [{ role: "user", content: "Hello panel" }]);
   assert.equal(body.open_doc, "sdlc/PRD.md");
   assert.equal(inputElement.value, "");
   assert.equal(state.chat.streaming, false);
