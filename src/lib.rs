@@ -6,6 +6,7 @@ pub mod chat;
 pub mod config;
 pub mod error;
 pub mod guard;
+pub mod proposal;
 pub mod routes;
 pub mod state;
 pub mod store;

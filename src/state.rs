@@ -4,12 +4,13 @@ use std::sync::Arc;
 
 use crate::chat::{ChatClient, ChatError};
 use crate::config::Config;
+use crate::proposal::ProposalService;
 use crate::store::DocStore;
 
 /// State cloned into every handler.
 ///
-/// It holds only cheaply cloneable `Arc`s and `Copy` values; services with
-/// interior mutability are added by later tickets.
+/// It holds only cheaply cloneable `Arc`s and `Copy` values; the proposal
+/// service adds the interior mutability of its in-memory proposal map.
 #[derive(Clone)]
 pub struct AppState {
     /// Immutable startup configuration.
@@ -21,6 +22,8 @@ pub struct AppState {
     pub bound_port: u16,
     /// The upstream chat client, built once at startup when AI is configured.
     pub chat: Arc<ChatClient>,
+    /// The in-memory proposal service that turns chat blocks into proposals.
+    pub proposals: Arc<ProposalService>,
 }
 
 impl AppState {
@@ -35,17 +38,21 @@ impl AppState {
         // reason the caller could fix here.
         let store = DocStore::new(config.project_dir().to_path_buf())
             .expect("the configured project directory was canonicalized at startup");
+        let store = Arc::new(store);
 
         let chat = match config.ai() {
             Some(ai) => Arc::new(ChatClient::new(ai)?),
             None => Arc::new(ChatClient::unconfigured()),
         };
 
+        let proposals = Arc::new(ProposalService::new(store.clone()));
+
         Ok(Self {
             config: Arc::new(config),
-            store: Arc::new(store),
+            store,
             bound_port,
             chat,
+            proposals,
         })
     }
 }
@@ -72,6 +79,7 @@ mod tests {
 
         assert!(Arc::ptr_eq(&state.config, &clone.config));
         assert!(Arc::ptr_eq(&state.store, &clone.store));
+        assert!(Arc::ptr_eq(&state.proposals, &clone.proposals));
         assert_eq!(clone.bound_port, 4321);
     }
 }
