@@ -39,7 +39,7 @@ function parseFrame(frame) {
       continue;
     }
     if (line.startsWith("event:")) {
-      event = line.slice(6).trim();
+      event = line.slice(6).replace(/^ /, "");
     } else if (line.startsWith("data:")) {
       // `data:` may carry an optional single space before the payload, and
       // several data lines of one frame are joined with a newline.
@@ -71,6 +71,11 @@ function parseFrame(frame) {
 // iteration ends with a `SseStoppedError`, which callers treat as a stop instead
 // of a failure (ticket 0037).
 export async function* readSse(response, signal) {
+  // A bodyless response (for example a 204) has nothing to read; end cleanly
+  // instead of failing on a missing reader.
+  if (response.body == null) {
+    return;
+  }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   // The stop promise settles once, when the stream stops; the reader race below

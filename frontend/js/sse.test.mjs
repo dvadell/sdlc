@@ -9,11 +9,11 @@ import { readSse, SseError, SseStoppedError } from "./sse.js";
 function sseResponse(chunks) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
-    start(controller) {
+    start(streamController) {
       for (const chunk of chunks) {
-        controller.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
+        streamController.enqueue(typeof chunk === "string" ? encoder.encode(chunk) : chunk);
       }
-      controller.close();
+      streamController.close();
     },
   });
   return { body: stream };
@@ -91,8 +91,8 @@ test("readSse surfaces an invalid JSON frame as a typed error", async () => {
 test("readSse stops on abort with a stopped error, not a network failure", async () => {
   const controller = new AbortController();
   const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode('event: delta\ndata: {"text": "Hello"}\n\n'));
+    start(streamController) {
+      streamController.enqueue(new TextEncoder().encode('event: delta\ndata: {"text": "Hello"}\n\n'));
     },
   });
   const pending = (async () => {

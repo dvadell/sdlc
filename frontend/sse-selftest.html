@@ -67,7 +67,8 @@
         const controller = new AbortController();
         const pending = (async () => {
           for await (const event of readSse({ body: neverEndingStream() }, controller.signal)) {
-            // A stopped stream yields no events before it stops.
+            // An aborted read ends iteration with SseStoppedError regardless of
+            // how many events were yielded before the abort fired.
           }
         })();
         setTimeout(() => controller.abort(), 25);
@@ -113,7 +114,10 @@
         check("a final frame without a trailing blank line is yielded", finalEvents.length === 1 && finalEvents[0].event === "done");
 
         const commentEvents = await collectEvents(sseResponse([': keep-alive\nevent: delta\ndata: {"text": "Hi"}\n\n']));
-        check("comments are ignored and the event defaults to message", commentEvents.length === 1 && commentEvents[0].event === "delta");
+        check("comments are ignored and an explicit event field is respected", commentEvents.length === 1 && commentEvents[0].event === "delta");
+
+        const defaultEvents = await collectEvents(sseResponse(['data: {"text": "Hi"}\n\n']));
+        check("the event defaults to message without an event field", defaultEvents.length === 1 && defaultEvents[0].event === "message");
 
         const heartbeatEvents = await collectEvents(sseResponse([": keep-alive\n\n"]));
         check("comment-only frames are ignored", heartbeatEvents.length === 0);
@@ -138,6 +142,15 @@
           runButton.disabled = false;
         });
       });
+
+      runButton.disabled = true;
+      run()
+        .catch(() => {
+          status.textContent = "The frame checks failed to run.";
+        })
+        .finally(() => {
+          runButton.disabled = false;
+        });
 
       run();
     </script>
