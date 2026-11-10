@@ -463,6 +463,21 @@ test("a streamed reply lands in one assistant bubble and renders markdown once c
   assert.equal(list.children[1].className, "chat-message chat-message-assistant");
 });
 
+test("a proposal stream event stores the proposal and shows its diff", async () => {
+  state.proposal = null;
+  response = sseResponse([
+    'event: proposal\ndata: {"id":"p1","changes":[{"path":"sdlc/features/export.md","action":"modify","diff":"@@ -1 +1 @@\\n-# Old\\n+# New"}],"warnings":[]}\n\n',
+    "event: done\ndata: {}\n\n",
+  ]);
+  state.chat.messages = [];
+  inputElement.value = "Hello panel";
+
+  await sendChat();
+
+  assert.equal(state.proposal?.id, "p1");
+  assert.equal(state.proposal.changes[0].path, "sdlc/features/export.md");
+});
+
 test("an incomplete assistant reply renders plain text and a completed one renders sanitized markdown", () => {
   state.chat.messages = [{ role: "assistant", content: "# Hello <script>", complete: false }];
   renderChat();

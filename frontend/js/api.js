@@ -2,11 +2,16 @@
 
 /** The error shape the API answers with: `{ "error": { "code", "message" } }`. */
 export class ApiError extends Error {
-  constructor(code, message, status) {
+  constructor(code, message, status, applied = null, failed = null) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
+    // The applied and failing paths of a proposal accept that stopped midway;
+    // both are null for every other error, and the partial apply answers with
+    // them beside the error envelope (ticket 0043, ticket 0045).
+    this.applied = applied;
+    this.failed = failed;
   }
 }
 
@@ -50,6 +55,8 @@ async function request(method, path, body, { timeout = 30_000 } = {}) {
         error?.code ?? "request_failed",
         error?.message ?? `request failed with status ${response.status}`,
         response.status,
+        payload?.applied,
+        payload?.failed,
       );
     }
 
@@ -142,4 +149,19 @@ export async function deleteDoc(path) {
 
 export async function scaffold() {
   return request("POST", "/api/scaffold", {});
+}
+
+// The accept of a proposal: writes the files it proposes, or answers why it
+// cannot (a conflict, a midway partial apply or an unknown id after a restart).
+export function proposalUrl(id) {
+  return `/api/proposals/${encodeURIComponent(id)}`;
+}
+
+export async function acceptProposal(id) {
+  return request("POST", `${proposalUrl(id)}/accept`, {});
+}
+
+// The reject of a proposal: discards it without touching the documents.
+export async function rejectProposal(id) {
+  return request("POST", `${proposalUrl(id)}/reject`, {});
 }

@@ -54,7 +54,7 @@ export function setRefreshTree(handler) {
 
 // The tree refresh after a save that can change a status; the sidebar owns the
 // refresh and installs it through the hook.
-function refreshTree() {
+export function refreshTree() {
   const handler = refreshTreeHandler;
   if (handler) {
     // The registration contract is a handler value, so a best-effort handler may
@@ -668,6 +668,16 @@ export function renderEditor() {
   });
 
   element.appendChild(conflictBanner);
+  if (state.proposal) {
+    // A proposal is pending a decision, so the editor area carries the pending
+    // indicator even while the person is not reading the diff (ticket 0045); the
+    // diff view itself carries the same marker while it replaces the editor.
+    const pending = document.createElement("div");
+    pending.id = "proposal-pending";
+    pending.className = "proposal-pending";
+    pending.textContent = "A proposal is pending your review.";
+    element.appendChild(pending);
+  }
   element.appendChild(toolbar);
   if (supersedesLine) {
     element.appendChild(supersedesLine);
@@ -988,6 +998,28 @@ async function overwriteWithMine() {
       hideConflictBanner(banner);
     }
   }
+}
+
+// The content of the editor buffer right now: the live textarea value when the
+// textarea is connected, the stored document content otherwise, so a diff view
+// that detached the textarea still reads the text the person is editing.
+export function editorText() {
+  return textarea?.isConnected ? textarea.value : (state.current?.content ?? "");
+}
+
+// Restores the editor area after a proposal decision: re-renders the editor
+// chrome and puts the buffer back, so the unsaved text of the person is kept
+// while a proposal diff was on screen and restored after the decision
+// (ticket 0045).
+export function restoreEditor() {
+  const text = editorText();
+  renderEditor();
+  if (!textarea) {
+    throw new Error("The editor is unavailable.");
+  }
+  textarea.value = text;
+  textarea.focus();
+  renderDirtyIndicator();
 }
 
 // Loads a document into the editor, asking before discarding unsaved changes.

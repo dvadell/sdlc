@@ -4,6 +4,7 @@
 import { state } from "./state.js";
 import { ApiError } from "./api.js";
 import { readSse } from "./sse.js";
+import { showProposal } from "./diff.js";
 
 // The abort controller of the reply in flight; null when the panel is idle.
 let abortController = null;
@@ -52,6 +53,13 @@ async function runAssistantStream(docPath, assistantEntry, attachments) {
           updateStreamingBubble(assistantEntry);
           autoScroll();
         }
+      } else if (event.event === "proposal") {
+        // The clean reply carried write or delete blocks: the server built the
+        // proposal, so the person reviews its diff and accepts or rejects it
+        // (ticket 0045); the transcript keeps the reply, the editor area shows
+        // the diff.
+        state.proposal = event.data ?? null;
+        showProposal(state.proposal);
       } else if (event.event === "error") {
         failure = event.data ?? null;
       }

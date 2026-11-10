@@ -776,3 +776,139 @@ body {
   border-radius: 4px;
   cursor: pointer;
 }
+
+/* The proposal diff view of the editor area (ticket 0045): one section per
+   proposed file, the warnings above the diff and the whole-proposal actions. */
+.proposal {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.proposal-pending {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  background: #e8f0fb;
+  border-bottom: 1px solid #c9dbf5;
+  color: #1f3a5f;
+  font-size: 0.9rem;
+}
+
+.proposal-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.5rem 0.75rem;
+  background: #fdf6e3;
+  border-bottom: 1px solid #ecd9a0;
+  color: #6b5310;
+}
+
+.proposal-warning {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.proposal-files {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.proposal-file {
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.proposal-file-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.proposal-file-path {
+  font-weight: 600;
+}
+
+.proposal-file-action {
+  padding: 0.05rem 0.45rem;
+  border-radius: 4px;
+  background: #f2f2f2;
+  color: #555555;
+  font-size: 0.75rem;
+  text-transform: capitalize;
+}
+
+.proposal-file-diff {
+  margin: 0;
+  padding: 0 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+/* The diff lines: additions and removals are visually distinct, while context
+   lines, the `---`/`+++` headers and the `@@` hunk markers stay plain (ticket
+   0045). */
+.proposal-file-diff .add {
+  background: #dafbe1;
+  color: #116329;
+}
+
+.proposal-file-diff .del {
+  background: #ffd7d5;
+  color: #82071e;
+}
+
+.proposal-file-diff .ctx {
+  color: #1a1a1a;
+}
+
+.proposal-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+.proposal-actions button {
+  padding: 0.2rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.proposal-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.proposal-actions #proposal-accept {
+  background: #dbe7f8;
+  border-color: #9db9e0;
+}
+
+.proposal-conflict,
+.proposal-partial {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+.proposal-conflict {
+  background: #fdf6e3;
+  border-bottom: 1px solid #ecd9a0;
+  color: #6b5310;
+}
+
+.proposal-partial {
+  background: #fdf6e3;
+  border-bottom: 1px solid #ecd9a0;
+  color: #6b5310;
+}
