@@ -620,7 +620,10 @@ mod tests {
         )
         .expect("the test config should build");
 
-        (AppState::new(config, 0), dir)
+        (
+            AppState::new(config, 0).expect("the state should build"),
+            dir,
+        )
     }
 
     #[tokio::test]

@@ -85,7 +85,8 @@ pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, 
         source,
     })?;
 
-    let state = AppState::new(config, addr.port());
+    let state =
+        AppState::new(config, addr.port()).map_err(|source| ServerError::Chat { source })?;
 
     println!("sdlc listening on http://{addr}");
     println!("{}", ai_status(state.config.as_ref()));

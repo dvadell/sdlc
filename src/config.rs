@@ -47,7 +47,6 @@ pub struct Config {
 }
 
 /// Connection settings for the OpenAI-compatible AI endpoint.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct AiConfig {
     /// Base URL without a trailing slash.
@@ -92,7 +91,6 @@ impl AiConfig {
 /// `Debug` is implemented by hand rather than derived so the secret never
 /// reaches logs, errors or debug output.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct ApiKey(String);
 
 impl ApiKey {

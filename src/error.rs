@@ -27,6 +27,14 @@ pub enum ServerError {
         #[source]
         source: io::Error,
     },
+
+    /// The AI chat client could not be built from the configuration.
+    #[error("failed to build the AI chat client: {source}")]
+    Chat {
+        /// The underlying chat configuration error.
+        #[source]
+        source: crate::chat::ChatError,
+    },
 }
 
 /// The error response returned by every API route.

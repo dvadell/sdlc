@@ -148,8 +148,18 @@ impl ChatClient {
             // it; an unparseable body is an invalid response. Reading takes
             // ownership of the response and a complete JSON answer is not
             // streamed, so a validated body means the completion was well formed.
+            // A stalled upstream that stops sending without closing the stream is
+            // reported as a network failure once the chunk goes idle.
             let mut body = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(|_| ChatError::Network)? {
+            loop {
+                let timed_out = tokio::time::timeout(CHUNK_IDLE, response.chunk()).await;
+                let chunk = match timed_out {
+                    Ok(result) => result.ok().flatten(),
+                    Err(_) => break,
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
                 body.extend_from_slice(&chunk);
             }
             serde_json::from_slice::<Value>(&body).map_err(|_| ChatError::InvalidResponse)?;
@@ -181,6 +191,10 @@ fn http_client() -> Result<Client, ChatError> {
         .map_err(|_| ChatError::Network)
 }
 
+/// Idle time allowed between response body chunks before a stalled upstream
+/// stream is reported as a network failure.
+const CHUNK_IDLE: Duration = Duration::from_secs(30);
+
 /// The media type of a response, lowercased and without parameters.
 fn response_content_type(response: &reqwest::Response) -> String {
     response
@@ -208,15 +222,6 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
 
-    fn client(base_url: &str, model: &str, api_key: Option<ApiKey>) -> ChatClient {
-        ChatClient::new(&AiConfig::new(
-            base_url.to_string(),
-            model.to_string(),
-            api_key,
-        ))
-        .expect("the chat client should build")
-    }
-
     fn message(content: &str) -> ChatMessage {
         ChatMessage {
             role: "user".to_string(),
@@ -235,8 +240,7 @@ mod tests {
     #[test]
     fn completions_url_trims_a_trailing_slash() {
         assert_eq!(
-            completions_url("https://api.openai.com/v1/")
-                .expect("the URL should build"),
+            completions_url("https://api.openai.com/v1/").expect("the URL should build"),
             "https://api.openai.com/v1/chat/completions"
         );
     }

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::chat::ChatClient;
+use crate::chat::{ChatClient, ChatError};
 use crate::config::Config;
 use crate::store::DocStore;
 
@@ -25,7 +25,11 @@ pub struct AppState {
 
 impl AppState {
     /// Creates the state for a server bound to `bound_port`.
-    pub fn new(config: Config, bound_port: u16) -> Self {
+    ///
+    /// The AI chat client is built from the configuration, so a bad AI base
+    /// URL is a startup error the caller reports instead of an expectation that
+    /// would panic the process.
+    pub fn new(config: Config, bound_port: u16) -> Result<Self, ChatError> {
         // The project directory was validated and canonicalized when the
         // configuration was built, so constructing the store cannot fail for a
         // reason the caller could fix here.
@@ -33,18 +37,16 @@ impl AppState {
             .expect("the configured project directory was canonicalized at startup");
 
         let chat = match config.ai() {
-            Some(ai) => Arc::new(ChatClient::new(ai).expect(
-                "the AI base URL must not end with /chat/completions",
-            )),
+            Some(ai) => Arc::new(ChatClient::new(ai)?),
             None => Arc::new(ChatClient::unconfigured()),
         };
 
-        Self {
+        Ok(Self {
             config: Arc::new(config),
             store: Arc::new(store),
             bound_port,
             chat,
-        }
+        })
     }
 }
 
@@ -65,7 +67,7 @@ mod tests {
             |_| None,
         )
         .expect("config should build");
-        let state = AppState::new(config, 4321);
+        let state = AppState::new(config, 4321).expect("the state should build");
         let clone = state.clone();
 
         assert!(Arc::ptr_eq(&state.config, &clone.config));

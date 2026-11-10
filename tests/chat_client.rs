@@ -10,7 +10,7 @@ fn client(base_url: &str, api_key: Option<String>) -> ChatClient {
     let ai = AiConfig::new(
         base_url.to_string(),
         "gpt-4o".to_string(),
-        api_key.map(|key| ApiKey::new(key)),
+        api_key.map(ApiKey::new),
     );
     ChatClient::new(&ai).expect("the chat client should build")
 }
@@ -86,7 +86,6 @@ async fn send_sends_no_bearer_token_without_a_key() {
 
     let received = mock_server.received_requests().await.expect("record");
     let request = received
-        .expect("requests should be recorded")
         .into_iter()
         .find(|request| request.url.path() == "/chat/completions")
         .expect("the chat completion request should be recorded");
@@ -146,7 +145,9 @@ async fn send_maps_invalid_json_response_to_invalid_response() {
 
     let mock = Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw(b"not json".to_vec(), "application/json"));
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(b"not json".to_vec(), "application/json"),
+        );
     mock.mount(&mock_server).await;
 
     let client = client(&mock_server.uri(), None);
@@ -160,13 +161,9 @@ async fn send_maps_invalid_json_response_to_invalid_response() {
 
 #[tokio::test]
 async fn send_maps_connection_refused_to_network() {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .expect("the blocker listener should bind");
-    let port = listener.local_addr().expect("the blocker address").port();
-    drop(listener);
-
-    let client = client(&format!("http://127.0.0.1:{port}"), None);
+    // An invalid port is refused by the kernel, so no listener can race a
+    // just-freed ephemeral port here.
+    let client = client("http://127.0.0.1:1", None);
     let err = client
         .send(&[message("hello")])
         .await
