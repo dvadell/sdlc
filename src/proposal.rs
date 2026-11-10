@@ -269,11 +269,7 @@ impl ProposalService {
     /// A successful apply removes the proposal and refreshes the PRD feature
     /// index when a feature was written or deleted; a proposal that carries the
     /// PRD itself skips that refresh, so the proposed PRD content wins.
-    pub async fn accept(
-        &self,
-        id: &str,
-        store: &Arc<DocStore>,
-    ) -> Result<AcceptReport, ProposalError> {
+    pub async fn accept(&self, id: &str) -> Result<AcceptReport, ProposalError> {
         {
             let mut accepts = self
                 .accepts
@@ -285,13 +281,26 @@ impl ProposalService {
             accepts.insert(id.to_string());
         }
 
-        let outcome = self.apply_proposal(id, store).await;
+        struct AcceptGuard<'a> {
+            accepts: &'a Mutex<std::collections::HashSet<String>>,
+            id: String,
+        }
 
-        self.accepts
-            .lock()
-            .expect("the proposal accept lock should not be poisoned")
-            .remove(id);
+        impl Drop for AcceptGuard<'_> {
+            fn drop(&mut self) {
+                if let Ok(mut accepts) = self.accepts.lock() {
+                    accepts.remove(&self.id);
+                }
+            }
+        }
 
+        let guard = AcceptGuard {
+            accepts: &self.accepts,
+            id: id.to_string(),
+        };
+        let outcome = self.apply_proposal(id).await;
+
+        std::mem::drop(guard);
         outcome
     }
 
@@ -300,7 +309,7 @@ impl ProposalService {
     /// Unknown ids are refused with [`ProposalError::NotFound`]; a known
     /// proposal is dropped from the in-memory map and the documents on disk are
     /// left alone.
-    pub async fn reject(&self, id: &str) -> Result<(), ProposalError> {
+    pub fn reject(&self, id: &str) -> Result<(), ProposalError> {
         let mut proposals = self
             .proposals
             .lock()
@@ -316,11 +325,7 @@ impl ProposalService {
     ///
     /// The proposal is re-checked change by change, then applied in block order;
     /// see [`ProposalService::accept`] for the conflict and partial rules.
-    async fn apply_proposal(
-        &self,
-        id: &str,
-        store: &Arc<DocStore>,
-    ) -> Result<AcceptReport, ProposalError> {
+    async fn apply_proposal(&self, id: &str) -> Result<AcceptReport, ProposalError> {
         let proposal = self
             .proposals
             .lock()
@@ -332,12 +337,12 @@ impl ProposalService {
         // Re-check every change before touching the disk, so a stale proposal
         // never writes anything at all.
         for change in &proposal.changes {
-            self.check_change(store, change).await?;
+            self.check_change(change).await?;
         }
 
         let mut applied: Vec<String> = Vec::new();
         for change in &proposal.changes {
-            if let Err(error) = self.apply_change(store, change).await {
+            if let Err(error) = self.apply_change(change).await {
                 // No transaction exists: report what was applied and stop, and
                 // keep the proposal so the person can inspect or reject it.
                 return Err(ProposalError::Partial {
@@ -349,7 +354,7 @@ impl ProposalService {
             applied.push(path_string(&change.path));
         }
 
-        let warnings = self.feature_refresh_warnings_for(proposal, store).await;
+        let warnings = self.feature_refresh_warnings_for(proposal).await;
 
         self.proposals
             .lock()
@@ -364,19 +369,15 @@ impl ProposalService {
     /// A `Modify` or `Delete` must still hash to the proposal's base hash, and
     /// a `Create` must still be missing; anything else is a conflict, so the
     /// accept writes nothing until the proposal is regenerated.
-    async fn check_change(
-        &self,
-        store: &Arc<DocStore>,
-        change: &Change,
-    ) -> Result<(), ProposalError> {
+    async fn check_change(&self, change: &Change) -> Result<(), ProposalError> {
         match change.action {
-            Action::Create => match store.read(&change.path).await {
+            Action::Create => match self.store.read(&change.path).await {
                 Ok(_) => Err(ProposalError::Conflict),
                 Err(StoreError::NotFound(_)) => Ok(()),
                 Err(error) => Err(error.into()),
             },
             Action::Modify | Action::Delete => {
-                let document = match store.read(&change.path).await {
+                let document = match self.store.read(&change.path).await {
                     Ok(document) => document,
                     // The file vanished after the proposal was built, so the
                     // proposal is stale and must not be applied.
@@ -392,27 +393,25 @@ impl ProposalService {
     }
 
     /// Applies one already-checked change through the store's atomic operations.
-    async fn apply_change(
-        &self,
-        store: &Arc<DocStore>,
-        change: &Change,
-    ) -> Result<(), ProposalError> {
+    async fn apply_change(&self, change: &Change) -> Result<(), ProposalError> {
         match change.action {
             Action::Create => {
                 let content = change.new_content.clone().unwrap_or_default();
-                store
+                self.store
                     .write(&change.path, &content, &Expectation::Missing)
                     .await?;
             }
             Action::Modify => {
                 let content = change.new_content.clone().unwrap_or_default();
                 let base_hash = change.base_hash.clone().unwrap_or_default();
-                store
+                self.store
                     .write(&change.path, &content, &Expectation::Existing(base_hash))
                     .await?;
             }
             Action::Delete => {
-                store.delete(&change.path).await.map(|_| ())?;
+                // The DeleteReport (including orphaned tickets) is not surfaced
+                // here; see ProposalError::Partial for the apply-failure reporting.
+                self.store.delete(&change.path).await.map(|_| ())?;
             }
         }
 
@@ -421,11 +420,7 @@ impl ProposalService {
 
     /// Refreshes the PRD feature index after a successful apply, unless the
     /// proposal carried the PRD itself and the proposed content must win.
-    async fn feature_refresh_warnings_for(
-        &self,
-        proposal: Proposal,
-        store: &Arc<DocStore>,
-    ) -> Vec<String> {
+    async fn feature_refresh_warnings_for(&self, proposal: Proposal) -> Vec<String> {
         if proposal_touches_prd(&proposal) {
             // The proposal replaced the PRD, so its content is the proposal.
             return Vec::new();
@@ -435,7 +430,7 @@ impl ProposalService {
             .iter()
             .any(|change| change_kind(&change.path) == Some(DocKind::Feature))
         {
-            return store.refresh_feature_index().await;
+            return self.store.refresh_feature_index().await;
         }
 
         Vec::new()
@@ -496,7 +491,6 @@ mod tests {
     use super::*;
     use crate::chat::Block;
     use crate::store::{DocStore, content_hash};
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -542,6 +536,22 @@ mod tests {
         std::fs::create_dir_all(path.parent().expect("feature dir")).expect("feature dir");
         std::fs::write(&path, content).expect("write feature");
         path
+    }
+
+    /// The test process runs with the effective user id 0, which bypasses the
+    /// read-only directory permissions a failure-path test relies on.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return false;
+        };
+        status.lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next() == Some("Uid:") {
+                return fields.next() == Some("0");
+            }
+            false
+        })
     }
 
     #[tokio::test]
@@ -798,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_applies_creates_modifies_and_deletes() {
-        let (dir, store, service) = service_in_temp_with_store().await;
+        let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         feature_file(&dir, "old.md", "# Old\n");
         let blocks = [
@@ -808,10 +818,7 @@ mod tests {
         ];
 
         let proposal = service.create(&blocks).await.expect("the proposal");
-        let report = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect("the accept");
+        let report = service.accept(&proposal.id).await.expect("the accept");
 
         assert_eq!(
             report.applied,
@@ -840,7 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_of_a_stale_hash_writes_nothing_and_keeps_the_proposal() {
-        let (dir, store, service) = service_in_temp_with_store().await;
+        let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
         let proposal = service.create(&blocks).await.expect("the proposal");
@@ -850,10 +857,7 @@ mod tests {
         )
         .expect("rewrite the feature");
 
-        let error = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect_err("the accept");
+        let error = service.accept(&proposal.id).await.expect_err("the accept");
 
         assert!(matches!(error, ProposalError::Conflict));
         assert_eq!(
@@ -866,17 +870,14 @@ mod tests {
 
     #[tokio::test]
     async fn accept_of_a_create_whose_target_appeared_is_a_conflict() {
-        let (dir, store, service) = service_in_temp_with_store().await;
+        let (dir, _store, service) = service_in_temp_with_store().await;
         std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("feature dir");
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
         let proposal = service.create(&blocks).await.expect("the proposal");
         std::fs::write(dir.path().join("sdlc/features/export.md"), "# External\n")
             .expect("write the feature");
 
-        let error = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect_err("the accept");
+        let error = service.accept(&proposal.id).await.expect_err("the accept");
 
         assert!(matches!(error, ProposalError::Conflict));
         assert_eq!(
@@ -888,7 +889,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_of_a_delete_of_a_changed_file_writes_nothing() {
-        let (dir, store, service) = service_in_temp_with_store().await;
+        let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         let proposal = service
             .create(&[delete_block("sdlc/features/export.md")])
@@ -900,10 +901,7 @@ mod tests {
         )
         .expect("rewrite the feature");
 
-        let error = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect_err("the accept");
+        let error = service.accept(&proposal.id).await.expect_err("the accept");
 
         assert!(matches!(error, ProposalError::Conflict));
         assert!(
@@ -914,23 +912,29 @@ mod tests {
 
     #[tokio::test]
     async fn accept_after_the_file_was_deleted_is_a_conflict() {
-        let (dir, store, service) = service_in_temp_with_store().await;
+        let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
         let proposal = service.create(&blocks).await.expect("the proposal");
         std::fs::remove_file(dir.path().join("sdlc/features/export.md")).expect("remove");
 
-        let error = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect_err("the accept");
+        let error = service.accept(&proposal.id).await.expect_err("the accept");
 
         assert!(matches!(error, ProposalError::Conflict));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn partial_apply_reports_the_applied_and_the_failing_path() {
-        let (dir, store, service) = service_in_temp_with_store().await;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Read-only directory permissions cannot force a write failure when the
+        // test process runs as root, which bypasses them.
+        if running_as_root() {
+            return;
+        }
+
+        let (dir, _store, service) = service_in_temp_with_store().await;
         write_file(&dir, "sdlc/PRD.md", "# Product Requirements Document\n");
         feature_file(&dir, "gamma.md", "# Gamma\n");
         let blocks = [
@@ -941,10 +945,7 @@ mod tests {
         let feature_dir = dir.path().join("sdlc/features");
         std::fs::set_permissions(&feature_dir, std::fs::Permissions::from_mode(0o500))
             .expect("make the feature dir read-only");
-        let error = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect_err("the accept");
+        let error = service.accept(&proposal.id).await.expect_err("the accept");
         std::fs::set_permissions(&feature_dir, std::fs::Permissions::from_mode(0o700))
             .expect("restore the feature dir");
 
@@ -983,10 +984,7 @@ mod tests {
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
 
         let proposal = service.create(&blocks).await.expect("the proposal");
-        let report = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect("the accept");
+        let report = service.accept(&proposal.id).await.expect("the accept");
 
         assert_eq!(report.applied, vec!["sdlc/features/export.md".to_string()]);
 
@@ -1017,10 +1015,7 @@ mod tests {
         let blocks = [write_block("sdlc/PRD.md", proposed)];
 
         let proposal = service.create(&blocks).await.expect("the proposal");
-        let report = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect("the accept");
+        let report = service.accept(&proposal.id).await.expect("the accept");
 
         assert!(report.warnings.is_empty());
 
@@ -1039,7 +1034,7 @@ mod tests {
         let proposal = service.create(&blocks).await.expect("the proposal");
         assert!(service.get(&proposal.id).is_some());
 
-        service.reject(&proposal.id).await.expect("the reject");
+        service.reject(&proposal.id).expect("the reject");
 
         assert!(service.get(&proposal.id).is_none());
         assert_eq!(
@@ -1053,28 +1048,22 @@ mod tests {
     async fn reject_of_an_unknown_id_is_not_found() {
         let (_dir, _store, service) = service_in_temp_with_store().await;
 
-        let error = service
-            .reject("no-such-proposal")
-            .await
-            .expect_err("the reject");
+        let error = service.reject("no-such-proposal").expect_err("the reject");
 
         assert!(matches!(error, ProposalError::NotFound(_)));
     }
 
     #[tokio::test]
     async fn a_second_accept_of_the_same_id_fails_cleanly() {
-        let (_dir, store, service) = service_in_temp_with_store().await;
+        let (_dir, _store, service) = service_in_temp_with_store().await;
         std::fs::create_dir_all(_dir.path().join("sdlc/features")).expect("feature dir");
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
         let proposal = service.create(&blocks).await.expect("the proposal");
-        let report = service
-            .accept(&proposal.id, &store)
-            .await
-            .expect("the accept");
+        let report = service.accept(&proposal.id).await.expect("the accept");
         assert_eq!(report.applied, vec!["sdlc/features/export.md".to_string()]);
 
         let error = service
-            .accept(&proposal.id, &store)
+            .accept(&proposal.id)
             .await
             .expect_err("the second accept");
 
