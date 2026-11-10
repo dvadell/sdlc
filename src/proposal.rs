@@ -288,9 +288,13 @@ impl ProposalService {
 
         impl Drop for AcceptGuard<'_> {
             fn drop(&mut self) {
-                if let Ok(mut accepts) = self.accepts.lock() {
-                    accepts.remove(&self.id);
-                }
+                // Recover the guard from a poisoned lock so the id is still
+                // cleared, matching the crate's other lock sites that unwrap.
+                let mut accepts = self
+                    .accepts
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                accepts.remove(&self.id);
             }
         }
 
@@ -300,7 +304,9 @@ impl ProposalService {
         };
         let outcome = self.apply_proposal(id).await;
 
-        std::mem::drop(guard);
+        // Dropping the guard clears the accept marker before the outcome is
+        // returned to the caller.
+        drop(guard);
         outcome
     }
 
@@ -548,7 +554,9 @@ mod tests {
         status.lines().any(|line| {
             let mut fields = line.split_whitespace();
             if fields.next() == Some("Uid:") {
-                return fields.next() == Some("0");
+                // `Uid: real effective saved fs`, so the effective uid is the
+                // one that decides whether the read-only permissions are bypassed.
+                return fields.nth(1) == Some("0");
             }
             false
         })
