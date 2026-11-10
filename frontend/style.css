@@ -206,6 +206,7 @@ body {
   grid-area: chat;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   border-left: 1px solid #e0e0e0;
 }
 
@@ -213,6 +214,170 @@ body {
   padding: 1rem;
   color: #666666;
   font-size: 0.9rem;
+}
+
+/* The transcript of the chat panel (ticket 0038); the auto-scroll only runs
+   while the person is already at the bottom, so the listener stores that fact and
+   the render scrolls only when it holds. */
+#chat-messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.75rem;
+}
+
+/* The composer and the guidance replace each other through `hidden`; the flex
+   children below would otherwise keep their display, so the reserved space is
+   explicit (ticket 0038 gotcha). */
+#chat [hidden] {
+  display: none;
+}
+
+/* One chat bubble: the role label plus the text body. The user bubble aligns
+   right, the assistant and error bubbles align left. */
+.chat-message {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-width: 100%;
+}
+
+.chat-message-user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.chat-message-assistant,
+.chat-message-error {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.chat-message-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #666666;
+}
+
+.chat-message-body {
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  background: #f2f2f2;
+  color: #1a1a1a;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.chat-message-user .chat-message-body {
+  background: #dbe7f8;
+}
+
+.chat-message-error .chat-message-body {
+  background: #fdecec;
+  color: #8c1f1f;
+}
+
+/* The composer of the chat panel; the send control is disabled while a reply
+   streams or while the text is empty, the stop control while one is running. */
+#chat-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid #e0e0e0;
+}
+
+#chat-hint {
+  margin: 0;
+  color: #666666;
+  font-size: 0.85rem;
+}
+
+#chat-input {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 0.9rem;
+  resize: vertical;
+  background: #ffffff;
+  color: #1a1a1a;
+}
+
+#chat-input:focus-visible {
+  outline: 2px solid #8bb0e8;
+  outline-offset: 2px;
+}
+
+.chat-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.chat-button {
+  padding: 0.2rem 0.75rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chat-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* The stop action is the destructive-looking escape of a running reply. */
+.chat-stop {
+  background: #fdecec;
+  border-color: #f3c1c1;
+  color: #8c1f1f;
+}
+
+/* The setup guidance shown while AI is not configured; the panel itself stays
+   visible, only this replaces the composer (ticket 0038 gotcha). */
+#chat-setup {
+  padding: 1rem;
+  color: #666666;
+  font-size: 0.9rem;
+}
+
+#chat-setup-list {
+  margin: 0.5rem 0;
+  padding-left: 1.2rem;
+}
+
+#chat-setup code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+
+/* The configured AI host and the one-line privacy notice of the panel; the
+   class selectors outrank the plain `#chat p` padding so the notice sits tight
+   under the transcript. */
+#chat .chat-host,
+#chat .chat-notice {
+  margin: 0;
+  padding: 0.4rem 0.75rem;
+  border-top: 1px solid #e0e0e0;
+  color: #666666;
+  font-size: 0.75rem;
+}
+
+#chat .chat-notice {
+  padding-bottom: 0.75rem;
 }
 
 /* The dirty indicator of the selected document, shown as `• filename` in the

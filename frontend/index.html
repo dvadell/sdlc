@@ -16,7 +16,27 @@
       <aside id="sidebar" aria-label="Documents"></aside>
       <main id="editor" aria-label="Document editor"></main>
       <aside id="chat" aria-label="AI chat">
-        <p id="chat-placeholder"></p>
+        <div id="chat-messages" class="chat-messages"></div>
+        <div id="chat-unconfigured" class="chat-setup" hidden>
+          <p class="chat-setup-title">AI chat is not configured.</p>
+          <p>Set the AI environment variables of the sdlc server, then restart sdlc:</p>
+          <ul class="chat-setup-list">
+            <li><code>SDLC_AI_BASE_URL</code> — the OpenAI-compatible base URL, for example <code>http://localhost:11434/v1</code>.</li>
+            <li><code>SDLC_AI_MODEL</code> — the model name, for example <code>llama3.2</code>.</li>
+            <li><code>SDLC_AI_API_KEY</code> — optional bearer token for hosted AI services.</li>
+          </ul>
+          <p>Restart sdlc after setting them.</p>
+        </div>
+        <div id="chat-form" class="chat-form" hidden>
+          <p id="chat-no-doc" class="chat-hint">Select a document to chat about.</p>
+          <textarea id="chat-input" class="chat-input" rows="3" placeholder="Ask about the selected document..."></textarea>
+          <div class="chat-actions">
+            <button type="button" id="chat-stop" class="chat-button chat-stop" hidden>Stop</button>
+            <button type="button" id="chat-send" class="chat-button chat-send">Send</button>
+          </div>
+        </div>
+        <p id="chat-ai-host" class="chat-host"></p>
+        <p id="chat-notice" class="chat-notice"></p>
       </aside>
       <div id="error-banner" class="error-banner" role="alert" aria-live="assertive" hidden></div>
     </div>

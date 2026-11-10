@@ -8,6 +8,7 @@ import {
 } from "./sidebar.js";
 import { loadDocument, save, setRefreshTree } from "./editor.js";
 import { hideError, installErrorBanner, showError } from "./errors.js";
+import { renderChat } from "./chat.js";
 
 const projectName = document.querySelector("#project-name");
 const aiStatus = document.querySelector("#ai-status");
@@ -15,7 +16,7 @@ const sidebar = document.querySelector("#sidebar");
 const editor = document.querySelector("#editor");
 const banner = document.querySelector("#error-banner");
 const app = document.querySelector("#app");
-const chatPlaceholder = document.querySelector("#chat-placeholder");
+const chat = document.querySelector("#chat");
 
 function renderHeader() {
   const config = state.config;
@@ -32,10 +33,6 @@ function renderEditorPlaceholder() {
   const paragraph = document.createElement("p");
   paragraph.textContent = "Select a document from the sidebar to start editing.";
   editor.appendChild(paragraph);
-}
-
-function renderChatPlaceholder() {
-  chatPlaceholder.textContent = state.chat.placeholder;
 }
 
 // The global save shortcut: Ctrl/Cmd+S saves and suppresses the browser save
@@ -61,7 +58,7 @@ async function boot() {
     !app ||
     !sidebar ||
     !editor ||
-    !chatPlaceholder ||
+    !chat ||
     !projectName ||
     !aiStatus
   ) {
@@ -72,7 +69,7 @@ async function boot() {
   hideError();
   renderSidebar();
   renderEditorPlaceholder();
-  renderChatPlaceholder();
+  renderChat();
   installErrorBanner();
   setEditorLoadDocument((path) => loadDocument(path));
   // The editor refreshes the document tree after status-changing saves through
@@ -92,6 +89,9 @@ async function boot() {
   if (config) {
     state.config = config;
     renderHeader();
+    // The chat panel reads the AI config, so it re-renders once it is known
+    // whether the AI is configured (ticket 0038).
+    renderChat();
   }
 
   if (tree) {

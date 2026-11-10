@@ -17,9 +17,10 @@ export const state = {
   },
   // Whether the current document has unsaved edits.
   dirty: false,
-  // Chat panel state: the messages and whether a stream is running. The
-  // placeholder shown before the chat wires up in milestone 3.
-  chat: { messages: [], streaming: false, placeholder: "AI chat arrives in milestone 3" },
+  // Chat panel state: the messages of the in-page transcript and whether a
+  // reply is streaming. The transcript lives here and nowhere else: no
+  // localStorage, no server history (ticket 0038).
+  chat: { messages: [], streaming: false },
   // The proposal currently awaiting a decision, if any.
   proposal: null,
 };
