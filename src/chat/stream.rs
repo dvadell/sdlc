@@ -13,7 +13,8 @@ const DONE: &str = "[DONE]";
 ///
 /// The stream ends cleanly on the `[DONE]` sentinel and ends with a typed
 /// error when an event cannot be turned into a delta, so callers never see a
-/// stream that fails on its own terms. The full reply is not accumulated here;
+/// stream that fails on its own terms; a source that ends without the sentinel
+/// is reported as a truncated stream. The full reply is not accumulated here;
 /// callers own the accumulation.
 pub fn parse<S, B, E>(stream: S) -> impl Stream<Item = Result<String, ChatError>>
 where
@@ -23,7 +24,13 @@ where
     stream::unfold(Some(stream.eventsource()), |source| async move {
         let mut source = source?;
         loop {
-            let item = source.next().await?;
+            let item = source.next().await;
+            let Some(item) = item else {
+                // The source ended without the `[DONE]` sentinel, so the reply
+                // was truncated before the upstream could finish it; report that
+                // as a typed error instead of ending the stream cleanly.
+                return Some((Err(ChatError::Network), None));
+            };
             let outcome: Option<Result<String, ChatError>> = match item {
                 Err(err) => Some(Err(event_error(&err))),
                 Ok(event) => {
@@ -74,10 +81,12 @@ fn delta(data: &str) -> Result<Option<String>, ChatError> {
         });
     };
 
-    if let Some(error) = value.get("error").and_then(Value::as_object) {
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         let message = error
-            .get("message")
+            .as_object()
+            .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
+            .or_else(|| error.as_str())
             .unwrap_or("the upstream reported an error");
         return Err(ChatError::UpstreamError {
             message: message.to_string(),
@@ -131,6 +140,7 @@ mod tests {
             data_event(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#),
             data_event(r#"{"choices":[{"delta":{"content":" world"}}]}"#),
             data_event(r#"{"choices":[{"delta":{"content":"!"}}]}"#),
+            "data: [DONE]\n\n".to_string(),
         ];
         let deltas = collect(&chunks).await;
 
@@ -145,6 +155,7 @@ mod tests {
         let chunks = vec![
             r#"data: {"choices":[{"delta":{"content":"Hel"#.to_string(),
             "lo\"}}]}\n\n".to_string(),
+            "data: [DONE]\n\n".to_string(),
         ];
         let deltas = collect(&chunks).await;
 
@@ -156,6 +167,7 @@ mod tests {
         let chunks = vec![
             r#"data: {"choices":[{"delta":{"content":"a"#.to_string(),
             "\u{1F44D}b\"}}]}\n\n".to_string(),
+            "data: [DONE]\n\n".to_string(),
         ];
         let deltas = collect(&chunks).await;
 
@@ -189,6 +201,7 @@ mod tests {
         let chunks = vec![
             data_event(r#"{"choices":[]}"#),
             data_event(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#),
+            "data: [DONE]\n\n".to_string(),
         ];
         let deltas = collect(&chunks).await;
 
@@ -218,21 +231,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upstream_error_as_bare_string_yields_an_upstream_error() {
+        let chunks = vec![data_event(r#"{"error":"boom"}"#)];
+        let deltas = collect(&chunks).await;
+
+        assert!(matches!(deltas[0], Err(ChatError::UpstreamError { .. })));
+    }
+
+    #[tokio::test]
+    async fn stream_end_without_done_emits_a_truncated_stream_error() {
+        let chunks = vec![data_event(r#"{"choices":[{"delta":{"content":"Hello"}}]}"#)];
+        let deltas = collect(&chunks).await;
+
+        // The source ended without the `[DONE]` sentinel, so the reply was
+        // truncated and the stream reports a typed error instead of ending
+        // cleanly after the partial delta.
+        assert_eq!(deltas.len(), 2);
+        assert!(matches!(&deltas[0], Ok(delta) if delta == "Hello"));
+        assert!(matches!(deltas[1], Err(ChatError::Network)));
+    }
+
+    #[tokio::test]
     async fn final_chunk_with_finish_reason_and_empty_content_is_ignored() {
-        let chunks = vec![data_event(
-            r#"{"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#,
-        )];
+        let chunks = vec![
+            data_event(r#"{"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}"#),
+            "data: [DONE]\n\n".to_string(),
+        ];
         let deltas = collect(&chunks).await;
 
         assert!(deltas.is_empty());
     }
 
     #[tokio::test]
-    async fn empty_stream_yields_no_items_without_panicking() {
+    async fn empty_stream_is_reported_as_truncated() {
         let empty: Vec<String> = Vec::new();
         let deltas = collect(&empty).await;
 
-        assert!(deltas.is_empty());
+        // An empty stream cannot have ended with the `[DONE]` sentinel, so the
+        // truncation is reported as a typed error instead of a clean end.
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(deltas[0], Err(ChatError::Network)));
     }
 
     #[tokio::test]
@@ -243,6 +281,7 @@ mod tests {
                 .to_string(),
             "data: {\"choices\": [\ndata: {\"delta\": {\"content\": \"Hello\"}}\ndata: ]}\n\n"
                 .to_string(),
+            "data: [DONE]\n\n".to_string(),
         ];
         let deltas = collect(&chunks).await;
 
