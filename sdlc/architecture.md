@@ -101,7 +101,9 @@ Stateless: the browser sends the full conversation with each request.
 3. Appends the conversation messages.
 4. Calls `POST {base_url}/chat/completions` with `stream: true`.
 5. Relays text deltas to the browser as they arrive.
-6. When the stream ends, scans the full reply for proposal blocks. If found, passes them to the Proposal service and emits a `proposal` event.
+6. When the stream ends, scans the full reply for proposal blocks and emits one
+   `warning` event per skipped block; when blocks are found, passes them to the
+   Proposal service and emits a `proposal` event.
 
 The AI has no tools and no function calling. This keeps the integration compatible with any OpenAI-compatible server.
 
@@ -153,7 +155,8 @@ All bodies are JSON unless noted. Errors use one shape: `{ "error": { "code": ".
 | Event | Data |
 |-------|------|
 | `delta` | `{ "text": "..." }`, a chunk of the reply |
-| `proposal` | `{ "id": "...", "changes": [ { "path", "action", "diff" } ] }` |
+| `warning` | `{ "message": "..." }`, one per malformed or skipped block |
+| `proposal` | `{ "id": "...", "changes": [ { "path", "action", "diff" } ], "warnings": [ ... ] }` |
 | `error` | `{ "code": "...", "message": "..." }` |
 | `done` | `{}` |
 

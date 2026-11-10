@@ -3,7 +3,9 @@
 //! `POST /api/chat` validates the conversation, loads the referenced documents
 //! and relays the upstream reply as Server-Sent Events that always terminate.
 
+use std::collections::VecDeque;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use axum::{
     Json,
@@ -15,8 +17,9 @@ use axum::{
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 
-use crate::chat::{ChatError, Message, build, parse};
+use crate::chat::{ChatError, Message, Parsed, blocks, build, parse};
 use crate::error::ApiError;
+use crate::proposal::{Action, Proposal, ProposalService};
 use crate::state::AppState;
 use crate::store::{DocPath, Document, StoreError};
 
@@ -34,7 +37,10 @@ const MAX_MESSAGE_CHARS: usize = 8192;
 /// answers with the JSON error envelope, never with an SSE stream. A missing AI
 /// configuration answers with `503 ai_not_configured` before a stream opens.
 /// The upstream reply is relayed frame by frame and the stream always ends:
-/// the final `done` frame on a clean end, one `error` frame on a failure.
+/// the final `done` frame on a clean end, one `error` frame on a failure. A
+/// clean reply is parsed for proposal blocks afterwards: the skipped blocks are
+/// answered with `warning` frames and a built proposal with one `proposal` frame
+/// before the `done` frame.
 pub(crate) async fn chat(
     State(state): State<AppState>,
     body: Result<Json<ChatRequest>, JsonRejection>,
@@ -56,7 +62,7 @@ pub(crate) async fn chat(
             Err(error) => Box::pin(stream::once(async move { Err::<String, ChatError>(error) })),
         };
 
-    Ok(sse_response(frames(source)))
+    Ok(sse_response(frames(source, state.proposals.clone())))
 }
 
 /// The body of a chat request.
@@ -174,7 +180,8 @@ fn sse_response(
     response
 }
 
-/// The state of the SSE relay: it is streaming upstream deltas or finished.
+/// The state of the SSE relay: it is streaming upstream deltas, emitting the
+/// final frames of a clean end or finished.
 enum RelayState {
     /// The upstream deltas are being turned into frames.
     Streaming {
@@ -182,7 +189,12 @@ enum RelayState {
         /// The full reply so far, accumulated for the later proposal ticket.
         accumulated: String,
     },
-    /// The reply ended; the frame was already emitted, so the stream ends.
+    /// The reply ended cleanly and its terminal frames were computed; they are
+    /// queued in order and emitted one by one until the queue drains.
+    Finalizing {
+        frames: VecDeque<Result<String, ChatError>>,
+    },
+    /// The final frame was emitted, so the stream ends.
     Finished,
 }
 
@@ -191,52 +203,113 @@ enum RelayState {
 /// The stream ends after the `done` frame of a clean end and after the `error`
 /// frame of a failure, so a client reader never waits for bytes that do not
 /// come. The source is boxed because both the upstream stream and the failed
-/// send case feed the same relay.
+/// send case feed the same relay; the proposal service turns the accumulated
+/// reply into the terminal frames once the upstream ended without error.
 fn frames(
     source: Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>>,
+    proposals: Arc<ProposalService>,
 ) -> impl Stream<Item = Result<String, ChatError>> + Send + 'static {
     stream::unfold(
         RelayState::Streaming {
             source,
             accumulated: String::new(),
         },
-        |state| async move {
-            let RelayState::Streaming {
-                mut source,
-                mut accumulated,
-            } = state
-            else {
-                // The final frame was emitted, so the stream ends here.
-                return None;
-            };
+        move |state| {
+            let value = proposals.clone();
+            async move {
+                let proposals = value;
+                let (frame, next_state) = match state {
+                    RelayState::Finished => return None,
+                    RelayState::Finalizing { mut frames } => {
+                        let Some(frame) = frames.pop_front() else {
+                            // The terminal frame was the last queued one, so the
+                            // stream ends here.
+                            return None;
+                        };
+                        (frame, RelayState::Finalizing { frames })
+                    }
+                    RelayState::Streaming {
+                        mut source,
+                        mut accumulated,
+                    } => {
+                        let item = source.next().await;
+                        let Some(item) = item else {
+                            // The clean end of the reply closes the stream with the
+                            // final frames: the warnings, the proposal and the `done`
+                            // frame, or the `error` frame of a refused proposal. A
+                            // reply that ended in an error never reaches this branch,
+                            // so a partial reply is never parsed.
+                            let parsed = blocks::parse(&accumulated);
+                            let mut frames: VecDeque<Result<String, ChatError>> =
+                                finalize_reply(&parsed, &proposals)
+                                    .await
+                                    .into_iter()
+                                    .collect();
+                            let Some(frame) = frames.pop_front() else {
+                                // `finalize_reply` always queues the terminal frame of a
+                                // reply before returning, so the queue cannot drain
+                                // before the proposal decision is made.
+                                return None;
+                            };
+                            return Some((frame, RelayState::Finalizing { frames }));
+                        };
 
-            let item = source.next().await;
-            let Some(item) = item else {
-                // The clean end of the reply closes the stream with `done`.
-                tracing::debug!(
-                    chars = accumulated.chars().count(),
-                    "the chat reply finished"
-                );
-                return Some((Ok(frame_done()), RelayState::Finished));
-            };
+                        let (frame, next_state) = match item {
+                            Err(error) => (frame_error(&error), RelayState::Finished),
+                            Ok(delta) => {
+                                accumulated.push_str(&delta);
+                                (
+                                    frame_delta(&delta),
+                                    RelayState::Streaming {
+                                        source,
+                                        accumulated,
+                                    },
+                                )
+                            }
+                        };
 
-            let (frame, next_state) = match item {
-                Err(error) => (frame_error(&error), RelayState::Finished),
-                Ok(delta) => {
-                    accumulated.push_str(&delta);
-                    (
-                        frame_delta(&delta),
-                        RelayState::Streaming {
-                            source,
-                            accumulated,
-                        },
-                    )
-                }
-            };
+                        (Ok(frame), next_state)
+                    }
+                };
 
-            Some((Ok(frame), next_state))
+                Some((frame, next_state))
+            }
         },
     )
+}
+
+/// Turns the parsed reply blocks into the terminal frames of a clean end.
+///
+/// The frames are the warnings of the skipped blocks, then the `proposal` frame
+/// of a built proposal, then the `done` frame; a refused proposal is answered
+/// with the `error` frame alone, so the stream always ends with one terminal
+/// event and never with `done` after an error.
+async fn finalize_reply(
+    parsed: &Parsed,
+    proposals: &ProposalService,
+) -> Vec<Result<String, ChatError>> {
+    let mut frames = Vec::new();
+
+    for warning in &parsed.warnings {
+        frames.push(Ok(frame_warning(warning)));
+    }
+
+    if parsed.blocks.is_empty() {
+        // A reply without blocks is ordinary chat text; its deltas were already
+        // streamed and the stream closes with `done`.
+        frames.push(Ok(frame_done()));
+        return frames;
+    }
+
+    match proposals.create(&parsed.blocks).await {
+        Ok(proposal) => {
+            frames.push(Ok(frame_proposal(&proposal, &parsed.warnings)));
+            frames.push(Ok(frame_done()));
+        }
+        Err(error) => frames.push(Ok(frame_error(&ChatError::from(error)))),
+    }
+
+    frames
 }
 
 /// The SSE frame that relays one text delta of the reply.
@@ -258,9 +331,51 @@ fn frame_error(error: &ChatError) -> String {
     )
 }
 
+/// The SSE frame that relays one warning of a skipped proposal block.
+fn frame_warning(message: &str) -> String {
+    format!(
+        "event: warning\ndata: {}\n\n",
+        serde_json::json!({ "message": message })
+    )
+}
+
+/// The SSE frame that relays the proposal built from a clean reply, with the
+/// warnings of the skipped blocks beside it.
+fn frame_proposal(proposal: &Proposal, warnings: &[String]) -> String {
+    let changes = proposal
+        .changes
+        .iter()
+        .map(|change| {
+            serde_json::json!({
+                "path": change.path.as_path().to_string_lossy(),
+                "action": action_name(change.action),
+                "diff": change.diff,
+            })
+        })
+        .collect::<Vec<serde_json::Value>>();
+
+    format!(
+        "event: proposal\ndata: {}\n\n",
+        serde_json::json!({
+            "id": proposal.id,
+            "changes": changes,
+            "warnings": warnings,
+        })
+    )
+}
+
 /// The final SSE frame that closes a clean reply.
 fn frame_done() -> String {
     "event: done\ndata: {}\n\n".to_string()
+}
+
+/// The proposal action name of one change, for the `proposal` event.
+fn action_name(action: Action) -> &'static str {
+    match action {
+        Action::Create => "create",
+        Action::Modify => "modify",
+        Action::Delete => "delete",
+    }
 }
 
 /// The stable machine-readable code of a chat failure, for the `error` event.
@@ -274,12 +389,14 @@ fn error_code(error: &ChatError) -> &'static str {
         ChatError::InvalidResponse { .. } => "invalid_response",
         ChatError::UpstreamError { .. } => "upstream_stream_error",
         ChatError::InvalidBaseUrl { .. } => "invalid_base_url",
+        ChatError::Proposal { code, .. } => code,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proposal::{Change, ProposalError};
 
     #[test]
     fn delta_frame_carries_the_text_in_a_json_data_event() {
@@ -317,5 +434,59 @@ mod tests {
             frame_error(&error),
             "event: error\ndata: {\"code\":\"upstream_stream_error\",\"message\":\"chat upstream returned an error: boom\"}\n\n"
         );
+    }
+
+    #[test]
+    fn warning_frame_carries_one_message() {
+        assert_eq!(
+            frame_warning("the block was skipped"),
+            "event: warning\ndata: {\"message\":\"the block was skipped\"}\n\n"
+        );
+    }
+
+    #[test]
+    fn error_frame_of_a_refused_proposal_uses_the_refusal_code() {
+        let error = ChatError::from(ProposalError::InvalidPath("../AGENTS.md".to_string()));
+
+        assert_eq!(
+            error_code(&error),
+            "invalid_path",
+            "the refusal should answer with its own code: {error}"
+        );
+        assert_eq!(
+            frame_error(&error),
+            "event: error\ndata: {\"code\":\"invalid_path\",\"message\":\"the proposed path is not an allowed document: ../AGENTS.md\"}\n\n"
+        );
+    }
+
+    #[test]
+    fn proposal_frame_carries_the_id_the_changes_and_the_warnings() {
+        let change = Change {
+            path: DocPath::parse("sdlc/features/export.md").expect("the path should be valid"),
+            action: Action::Create,
+            new_content: Some("# Export\n".to_string()),
+            base_hash: None,
+            diff: String::new(),
+        };
+        let proposal = Proposal {
+            id: "0d1b2f3a-4b5c-6d7e-8f90-1a2b3c4d5e6f".to_string(),
+            changes: vec![change],
+        };
+
+        let frame = frame_proposal(&proposal, &["the block was skipped".to_string()]);
+        let data = frame
+            .strip_prefix("event: proposal\ndata: ")
+            .and_then(|data| data.strip_suffix("\n\n"))
+            .expect("the proposal frame should carry one data line");
+        let value: serde_json::Value =
+            serde_json::from_str(data).expect("the proposal data should be JSON");
+
+        assert_eq!(value["id"], "0d1b2f3a-4b5c-6d7e-8f90-1a2b3c4d5e6f");
+        let changes = value["changes"].as_array().expect("the changes");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["path"], "sdlc/features/export.md");
+        assert_eq!(changes[0]["action"], "create");
+        assert_eq!(changes[0]["diff"], "");
+        assert_eq!(value["warnings"][0], "the block was skipped");
     }
 }

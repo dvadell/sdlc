@@ -8,6 +8,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::config::{AiConfig, ApiKey};
+use crate::proposal::ProposalError;
 
 /// Errors returned by the upstream chat client.
 #[derive(Debug, Error)]
@@ -57,6 +58,46 @@ pub enum ChatError {
         /// The offending base URL.
         base_url: String,
     },
+
+    /// The reply ended cleanly but its proposed blocks could not become a
+    /// proposal; the refusal carries the stable code and the short message of
+    /// the chat stream error.
+    #[error("{message}")]
+    Proposal {
+        /// The stable machine-readable refusal code, such as `invalid_path`.
+        code: &'static str,
+        /// The short human-readable refusal message.
+        message: String,
+    },
+}
+
+impl From<ProposalError> for ChatError {
+    fn from(error: ProposalError) -> Self {
+        let (code, message) = match &error {
+            ProposalError::InvalidPath(path) => (
+                "invalid_path",
+                format!("the proposed path is not an allowed document: {path}"),
+            ),
+            ProposalError::DuplicatePath(path) => {
+                ("duplicate_path", format!("duplicate proposed path: {path}"))
+            }
+            ProposalError::MissingTarget(path) => (
+                "missing_target",
+                format!("the proposed document is missing: {path}"),
+            ),
+            ProposalError::EmptyProposal => {
+                ("empty_proposal", "the proposal has no changes".to_string())
+            }
+            ProposalError::Store(_)
+            | ProposalError::DiffTask(_)
+            | ProposalError::Conflict
+            | ProposalError::NotFound(_)
+            | ProposalError::InProgress
+            | ProposalError::Partial { .. } => ("proposal_error", error.to_string()),
+        };
+
+        ChatError::Proposal { code, message }
+    }
 }
 
 /// One conversation turn sent to the upstream model.
@@ -314,5 +355,19 @@ mod tests {
         for err in errors {
             assert!(!err.to_string().contains("sk-secret-value"), "{err}");
         }
+    }
+
+    #[test]
+    fn a_proposal_refusal_maps_to_its_stable_code_and_message() {
+        let error = ChatError::from(ProposalError::InvalidPath("../AGENTS.md".to_string()));
+
+        let ChatError::Proposal { code, message } = error else {
+            panic!("the refusal should carry the proposal refusal payload");
+        };
+        assert_eq!(code, "invalid_path");
+        assert_eq!(
+            message,
+            "the proposed path is not an allowed document: ../AGENTS.md"
+        );
     }
 }

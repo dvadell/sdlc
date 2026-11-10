@@ -685,3 +685,421 @@ async fn a_missing_attachment_is_skipped_and_the_reply_still_streams() {
     assert!(response.body.contains("event: done"));
     mock_server.verify().await;
 }
+
+/// The SSE frame of one chat event, found in the body of a reply.
+fn frame_of<'a>(body: &'a str, event: &str) -> &'a str {
+    let prefix = format!("event: {event}");
+    body.split("\n\n")
+        .map(str::trim)
+        .find(|frame| frame.starts_with(prefix.as_str()))
+        .unwrap_or_else(|| panic!("the {event} frame should be in the body: {body}"))
+}
+
+/// The JSON data payload of one SSE frame.
+fn frame_data(frame: &str) -> serde_json::Value {
+    let mut lines = frame.split('\n');
+    let _event = lines.next().unwrap_or("");
+    let data = lines
+        .next()
+        .unwrap_or("")
+        .strip_prefix("data: ")
+        .unwrap_or_else(|| panic!("the frame should carry data: {frame}"));
+    serde_json::from_str(data).expect("the frame data should be JSON")
+}
+
+#[tokio::test]
+async fn a_clean_reply_with_a_file_block_emits_delta_proposal_and_done() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"I will add the export.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== FILE: sdlc/features/export.md ===\\n# Export v2\\n=== END FILE ===\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request(
+            user_message("add the export"),
+            "sdlc/features/export.md",
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("content-type"), Some("text/event-stream"));
+    assert!(
+        response
+            .body
+            .starts_with("event: delta\ndata: {\"text\":\"I will add the export.\"}\n\n"),
+        "the reply text should stream first: {}",
+        response.body
+    );
+    assert!(
+        response.body.ends_with("event: done\ndata: {}\n\n"),
+        "the clean reply should end with the done frame: {}",
+        response.body
+    );
+
+    let delta_at = response
+        .body
+        .find("event: delta")
+        .expect("the delta frame should be in the body");
+    let proposal_at = response
+        .body
+        .find("event: proposal")
+        .expect("the proposal frame should be in the body");
+    let done_at = response
+        .body
+        .find("event: done")
+        .expect("the done frame should be in the body");
+    assert!(
+        delta_at < proposal_at && proposal_at < done_at,
+        "the frames should stream delta, proposal, done: {}",
+        response.body
+    );
+
+    let proposal = frame_data(frame_of(&response.body, "proposal"));
+    assert!(!proposal["id"].as_str().expect("the proposal id").is_empty());
+    let changes = proposal["changes"]
+        .as_array()
+        .expect("the proposal changes");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["path"], "sdlc/features/export.md");
+    assert_eq!(changes[0]["action"], "modify");
+    assert!(
+        changes[0]["diff"]
+            .as_str()
+            .expect("the proposal diff should be a string")
+            .contains("--- a/sdlc/features/export.md"),
+        "the proposal diff should show the change: {}",
+        changes[0]["diff"]
+    );
+    assert_eq!(
+        proposal["warnings"]
+            .as_array()
+            .expect("the proposal warnings")
+            .len(),
+        0
+    );
+
+    // The reply only built the proposal in memory: no file was written here.
+    assert_eq!(
+        fs::read_to_string(dir.path().join("sdlc/features/export.md")).expect("read the feature"),
+        "# Export\n"
+    );
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn a_reply_with_a_write_and_a_delete_emits_one_proposal_with_both_changes() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"I will update the export and retire the old ticket.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== FILE: sdlc/features/export.md ===\\n# Export v2\\n=== END FILE ===\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== DELETE: sdlc/epics/0001-foundation/tickets/0007-old-ticket.md ===\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/tickets/0007-old-ticket.md",
+        b"# Old Ticket\n",
+    );
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request(
+            user_message("update the export and retire the old ticket"),
+            "sdlc/features/export.md",
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    let delta_at = response
+        .body
+        .find("event: delta")
+        .expect("the delta frame should be in the body");
+    let proposal_at = response
+        .body
+        .find("event: proposal")
+        .expect("the proposal frame should be in the body");
+    let done_at = response
+        .body
+        .find("event: done")
+        .expect("the done frame should be in the body");
+    assert!(
+        delta_at < proposal_at && proposal_at < done_at,
+        "the frames should stream delta, proposal, done: {}",
+        response.body
+    );
+    assert!(
+        !response.body.contains("event: warning"),
+        "a clean reply should not warn: {}",
+        response.body
+    );
+    assert!(response.body.ends_with("event: done\ndata: {}\n\n"));
+
+    let proposal = frame_data(frame_of(&response.body, "proposal"));
+    let changes = proposal["changes"]
+        .as_array()
+        .expect("the proposal changes");
+    assert_eq!(changes.len(), 2);
+
+    assert_eq!(changes[0]["path"], "sdlc/features/export.md");
+    assert_eq!(changes[0]["action"], "modify");
+    assert!(
+        changes[0]["diff"]
+            .as_str()
+            .expect("the proposal diff should be a string")
+            .contains("--- a/sdlc/features/export.md")
+    );
+
+    assert_eq!(
+        changes[1]["path"],
+        "sdlc/epics/0001-foundation/tickets/0007-old-ticket.md"
+    );
+    assert_eq!(changes[1]["action"], "delete");
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn an_unterminated_block_emits_a_warning_then_done_and_no_proposal() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Sure, I will update it.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== FILE: sdlc/features/export.md ===\\n# No end marker\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request(
+            user_message("update it"),
+            "sdlc/features/export.md",
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert!(response.body.contains("event: warning"));
+    assert_eq!(
+        frame_data(frame_of(&response.body, "warning"))["message"],
+        "unterminated FILE block for sdlc/features/export.md: missing end marker"
+    );
+    assert!(
+        !response.body.contains("event: proposal"),
+        "a malformed block must not become a proposal: {}",
+        response.body
+    );
+    assert!(
+        response.body.ends_with("event: done\ndata: {}\n\n"),
+        "the malformed reply should end with the done frame: {}",
+        response.body
+    );
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn an_invalid_proposed_path_emits_an_error_and_no_proposal_and_writes_nothing() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"I will edit the config.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== FILE: ../../etc/passwd ===\\nroot:x:0:0\\n=== END FILE ===\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request(
+            user_message("edit the config"),
+            "sdlc/features/export.md",
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        concat!(
+            "event: delta\ndata: {\"text\":\"I will edit the config.\"}\n\n",
+            "event: delta\ndata: {\"text\":\"\\n=== FILE: ../../etc/passwd ===\\nroot:x:0:0\\n=== END FILE ===\"}\n\n",
+            "event: error\ndata: {\"code\":\"invalid_path\",\"message\":\"the proposed path is not an allowed document: ../../etc/passwd\"}\n\n",
+        )
+    );
+    assert!(
+        !response.body.contains("event: done"),
+        "an error must not be followed by a done frame: {}",
+        response.body
+    );
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join("sdlc/features/export.md")).expect("read the feature"),
+        "# Export\n",
+        "a refused proposal must not write any file"
+    );
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn a_truncated_upstream_reply_emits_no_proposal() {
+    let mock_server = MockServer::start().await;
+
+    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"I will add\"}}]}\n\n";
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request(
+            user_message("hello"),
+            "sdlc/features/export.md",
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        "event: delta\ndata: {\"text\":\"I will add\"}\n\n\
+         event: error\ndata: {\"code\":\"truncated\",\"message\":\"chat upstream stream ended before the reply was complete\"}\n\n"
+    );
+    assert!(
+        !response.body.contains("event: proposal"),
+        "a truncated reply must not become a proposal: {}",
+        response.body
+    );
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn an_ordinary_reply_without_blocks_emits_no_proposal() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Just an ordinary answer.\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request(
+            user_message("hello"),
+            "sdlc/features/export.md",
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        concat!(
+            "event: delta\ndata: {\"text\":\"Just an ordinary answer.\"}\n\n",
+            "event: done\ndata: {}\n\n",
+        )
+    );
+
+    mock_server.verify().await;
+}
