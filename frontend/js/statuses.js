@@ -117,11 +117,11 @@ export function decisionNumberOf(path) {
   }
   const segments = pathSegments(path);
   const file = segments[segments.length - 1] ?? "";
-  const stem = file.endsWith(".md") ? file.slice(0, -3) : file;
-  const dash = stem.indexOf("-");
-  const prefix = stem.slice(0, dash);
+  const stem = file.slice(0, -3); // The .md suffix is guaranteed by the statusKindOf check above.
   if (!isNumberedSlug(stem)) {
     return null;
   }
+  const dash = stem.indexOf("-");
+  const prefix = stem.slice(0, dash);
   return Number(prefix);
 }

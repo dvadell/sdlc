@@ -267,7 +267,7 @@ async function createFromGroup(group) {
     }
     const decidedStatus = String(outcome.status ?? STATUS_OPTIONS.decision[0]);
     if (!STATUS_OPTIONS.decision.includes(decidedStatus)) {
-      showError(new Error("The decision status must be proposed, accepted or superseded."));
+      showError(new Error(`The decision status must be ${STATUS_OPTIONS.decision.join("/ ")}.`));
       return;
     }
     documentTitle = decidedTitle;

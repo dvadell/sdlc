@@ -7,8 +7,12 @@ import { STATUS_OPTIONS, decisionNumberOf } from "./statuses.js";
 function pendingSupersedes(value) {
   const raw = value === null || value === undefined ? "" : String(value);
   const number = raw.length > 0 ? Number(raw) : null;
-  const normalized = number !== null && Number.isFinite(number) ? String(number) : raw;
-  return { raw: normalized, number, hasNumber: Number.isFinite(number) };
+  const isPositiveInteger = number !== null && Number.isInteger(number) && number > 0;
+  return {
+    raw: isPositiveInteger ? String(number) : "",
+    number: isPositiveInteger ? number : null,
+    hasNumber: isPositiveInteger,
+  };
 }
 
 // The optional supersedes choices of the decision-create dialog: the existing
