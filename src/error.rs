@@ -50,6 +50,11 @@ pub struct ApiError {
     code: &'static str,
     /// Short human-readable message safe to expose to the client.
     message: String,
+    /// The paths that were applied before a partial proposal apply failed, in
+    /// block order; set only while the error is a partial apply.
+    applied: Option<Vec<String>>,
+    /// The path of the change that failed during a partial proposal apply.
+    failed: Option<String>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -112,17 +117,20 @@ impl ApiError {
     }
 
     /// Builds the `500 Internal Server Error` error of a proposal accept that
-    /// stopped midway.
+    /// stopped midway, carrying the applied and failing paths.
     ///
     /// The accept already applied some changes, so the response carries the
     /// applied paths and the failing path beside the error envelope; see
     /// [`crate::routes::proposals`].
-    pub fn partial_apply() -> Self {
-        Self::fixed(
+    pub fn partial_apply(applied: Vec<String>, failed: String) -> Self {
+        let mut error = Self::fixed(
             StatusCode::INTERNAL_SERVER_ERROR,
             "partial_apply",
             "the proposal apply stopped midway",
-        )
+        );
+        error.applied = Some(applied);
+        error.failed = Some(failed);
+        error
     }
 
     /// Builds a `500 Internal Server Error`, logging the cause for debugging.
@@ -148,6 +156,8 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            applied: None,
+            failed: None,
         }
     }
 
@@ -232,20 +242,30 @@ impl From<ProposalError> for ApiError {
             ProposalError::NotFound(_) => ApiError::not_found(),
             ProposalError::Conflict => ApiError::conflict(),
             ProposalError::InProgress => ApiError::conflict(),
-            ProposalError::Partial { .. } => ApiError::partial_apply(),
+            ProposalError::Partial {
+                applied, failed, ..
+            } => ApiError::partial_apply(applied, failed),
+            // The proposal build refusals are client-input validation failures;
+            // the store and diff task failures are internal ones.
             ProposalError::EmptyProposal
             | ProposalError::InvalidPath(_)
             | ProposalError::DuplicatePath(_)
-            | ProposalError::MissingTarget(_)
-            | ProposalError::Store(_) => ApiError::internal(&error),
-            ProposalError::DiffTask(_) => ApiError::internal(&error),
+            | ProposalError::MissingTarget(_) => ApiError::bad_request(),
+            ProposalError::Store(_) | ProposalError::DiffTask(_) => ApiError::internal(&error),
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(self.envelope())).into_response()
+        let mut body = self.envelope();
+        if let Some(applied) = &self.applied {
+            body["applied"] = serde_json::json!(applied);
+        }
+        if let Some(failed) = &self.failed {
+            body["failed"] = serde_json::json!(failed);
+        }
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -393,6 +413,8 @@ mod tests {
             status: StatusCode::BAD_REQUEST,
             code: "bad_request",
             message: "quote \" and newline\n".to_string(),
+            applied: None,
+            failed: None,
         };
 
         let body = serde_json::to_value(err.envelope()).expect("error body should serialize");

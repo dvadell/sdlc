@@ -10,11 +10,9 @@
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
-    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 use crate::error::ApiError;
 use crate::proposal::ProposalError;
@@ -70,19 +68,15 @@ pub(crate) async fn accept(
         Err(ProposalError::Conflict) => Err(ApiError::conflict()),
         Err(ProposalError::InProgress) => Err(ApiError::conflict()),
         Err(ProposalError::Partial {
-            applied, failed, ..
+            applied,
+            failed,
+            reason,
         }) => {
-            // The error envelope keeps the standard shape, and the partial
-            // details sit beside it; the diff UI ticket picks the final shape.
-            let body = json!({
-                "error": {
-                    "code": "partial_apply",
-                    "message": "the proposal apply stopped midway",
-                },
-                "applied": applied,
-                "failed": failed,
-            });
-            Ok((StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response())
+            // The apply stopped midway; log the failing change and answer with
+            // the applied and failing paths beside the error envelope. The diff
+            // UI ticket picks the final shape.
+            tracing::error!(applied = ?applied, failed = %failed, reason = %reason, "proposal apply stopped midway");
+            Err(ApiError::partial_apply(applied, failed))
         }
         Err(error) => Err(ApiError::from(error)),
     }
@@ -107,6 +101,7 @@ pub(crate) async fn reject(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn the_accept_response_serializes_the_applied_paths_and_the_optional_warnings() {
