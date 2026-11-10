@@ -45,13 +45,15 @@ pub fn parse(content: &str) -> Parsed {
     };
     let mut open: Option<OpenWrite> = None;
 
-    for line in content.replace("\r\n", "\n").split('\n') {
+    for line in content.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
         let trimmed = line.trim();
         let Some(marker) = marker(trimmed) else {
             // Text outside a block is ordinary chat; only lines inside a block
             // become content of the proposal.
             if let Some(block) = open.as_mut() {
-                block.content.push(line.to_string());
+                block.content.push_str(line);
+                block.content.push('\n');
             }
             continue;
         };
@@ -69,7 +71,7 @@ pub fn parse(content: &str) -> Parsed {
                 }
                 open = Some(OpenWrite {
                     path,
-                    content: Vec::new(),
+                    content: String::new(),
                 });
             }
             Marker::End => {
@@ -97,8 +99,8 @@ pub fn parse(content: &str) -> Parsed {
 struct OpenWrite {
     /// The proposed target path, as written between the markers.
     path: String,
-    /// The content lines, without their line endings.
-    content: Vec<String>,
+    /// The content of the proposal, with a final newline before the end marker.
+    content: String,
 }
 
 /// A recognized marker line of a model reply.
@@ -154,7 +156,7 @@ fn accept_write(parsed: &mut Parsed, block: OpenWrite) {
         parsed,
         Block::Write {
             path: block.path,
-            content: content_of(&block.content),
+            content: block.content,
         },
     );
 }
@@ -176,13 +178,6 @@ fn skip_invalid_path(parsed: &mut Parsed, kind: &str, path: &str) -> bool {
             .push(format!("the {kind} block has an empty path; skipping it"));
         return true;
     }
-    if path.contains('\n') {
-        parsed
-            .warnings
-            .push(format!("the {kind} block path has a newline: {path}"));
-        return true;
-    }
-
     false
 }
 
@@ -207,18 +202,6 @@ fn path_of(block: &Block) -> &str {
     match block {
         Block::Write { path, .. } | Block::Delete { path } => path,
     }
-}
-
-/// Joins the content lines, keeping a final newline before the end marker.
-fn content_of(lines: &[String]) -> String {
-    if lines.is_empty() {
-        // An empty body between the markers is a valid write of empty content.
-        return String::new();
-    }
-
-    let mut content = lines.join("\n");
-    content.push('\n');
-    content
 }
 
 #[cfg(test)]
