@@ -1,5 +1,5 @@
 //! The AI chat panel: transcript bubbles, composer, streaming, stop and error
-//! states (ticket 0038).
+//! states (tickets 0038 and 0039).
 
 import { state } from "./state.js";
 import { ApiError } from "./api.js";
@@ -36,11 +36,11 @@ function updateStreamingBubble(entry) {
 // The AI reply in flight: POST the conversation, relay the SSE stream and turn
 // the three outcomes (`done`, `error`, connection loss / stop) into transcript
 // updates. Returns `{ stopped }` for a stop and `{ error }` for a failure.
-async function runAssistantStream(docPath, assistantEntry) {
+async function runAssistantStream(docPath, assistantEntry, attachments) {
   const controller = new AbortController();
   abortController = controller;
   try {
-    const response = await postChat(docPath, controller.signal);
+    const response = await postChat(docPath, attachments, controller.signal);
     let failure = null;
     for await (const event of readSse(response, controller.signal)) {
       if (event.event === "delta") {
@@ -74,10 +74,12 @@ async function runAssistantStream(docPath, assistantEntry) {
   }
 }
 
-// The chat request: the conversation turns, the open document and nothing else
-// in scope. The server reads the document contents from disk, so the browser
-// never sends document text of its own.
-async function postChat(docPath, signal) {
+// The chat request: the conversation turns, the open document and the attached
+// documents, and nothing else in scope. The server reads the document contents
+// from disk, so the browser never sends document text of its own; the open
+// document is always part of the context, the attachments ride along (ticket
+// 0039).
+async function postChat(docPath, attachments, signal) {
   const history = state.chat.messages
     .filter(
       (entry) =>
@@ -89,7 +91,7 @@ async function postChat(docPath, signal) {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages: history, open_doc: docPath }),
+    body: JSON.stringify({ messages: history, open_doc: docPath, attachments }),
     signal,
   });
   if (!response.ok) {
@@ -144,6 +146,191 @@ function renderNotice() {
   }
 }
 
+// The attach control of the panel: the chips of the open and the attached
+// documents, plus the toggle of the checklist of attachable documents (ticket
+// 0039).
+function renderAttachments() {
+  const chips = document.querySelector("#chat-attachment-chips");
+  const attachButton = document.querySelector("#chat-attach");
+  const openPath = state.current?.path ?? null;
+  const attached = (state.chat.attachments ?? []).filter((path) => path && path !== openPath);
+
+  const visible = Boolean(openPath) || attached.length > 0;
+  if (chips) {
+    chips.replaceChildren();
+    if (openPath) {
+      chips.appendChild(renderOpenChip(openPath));
+    }
+    for (const path of attached) {
+      chips.appendChild(renderAttachmentChip(path));
+    }
+    chips.hidden = !visible;
+  }
+  if (attachButton) {
+    attachButton.hidden = !openPath;
+  }
+}
+
+// The fixed chip of the open document: it is never removable, so the person
+// always sees that the open document is part of the context (ticket 0039).
+function renderOpenChip(path) {
+  const chip = document.createElement("div");
+  chip.className = "chat-chip chat-chip-open";
+  chip.textContent = path;
+  return chip;
+}
+
+// One removable chip of an attached document; its remove button detaches the
+// document again (ticket 0039).
+function renderAttachmentChip(path) {
+  const chip = document.createElement("div");
+  chip.className = "chat-chip chat-chip-attachment";
+  chip.textContent = path;
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "chat-chip-remove";
+  remove.textContent = "Remove";
+  remove.addEventListener("click", () => {
+    removeAttachment(path);
+  });
+  chip.appendChild(remove);
+  return chip;
+}
+
+// The attach button toggles the checklist of the documents the person may
+// attach, minus the open document; the checklist is a plain list of checkboxes,
+// so it stays keyboard accessible (ticket 0039).
+function bindAttachButton(button) {
+  if (!button || button.__chatAttachBound) {
+    return;
+  }
+  button.__chatAttachBound = true;
+  button.addEventListener("click", () => {
+    const panel = document.querySelector("#chat-attach-panel");
+    const open = Boolean(panel) && !panel.hidden;
+    const nextOpen = !open;
+    if (panel) {
+      panel.hidden = !nextOpen;
+      button.setAttribute("aria-expanded", String(nextOpen));
+    }
+    if (nextOpen) {
+      renderChecklist();
+    }
+  });
+}
+
+// The checklist of attachable documents, rebuilt from the tree whenever it is
+// opened; a checked entry attaches, an unchecked one detaches (ticket 0039).
+function renderChecklist() {
+  const list = document.querySelector("#chat-attach-list");
+  if (!list) {
+    return;
+  }
+  list.replaceChildren();
+  const openPath = state.current?.path ?? null;
+  for (const path of availableAttachments()) {
+    const item = document.createElement("li");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = (state.chat.attachments ?? []).includes(path);
+    checkbox.addEventListener("change", (event) => {
+      toggleAttachment(path, Boolean(event?.target?.checked));
+    });
+    const label = document.createElement("label");
+    label.textContent = path;
+    item.appendChild(checkbox);
+    item.appendChild(label);
+    list.appendChild(item);
+  }
+}
+
+// The checklist of the attach control: every tree document except the open
+// one, in tree order (ticket 0039).
+export function availableAttachments() {
+  const openPath = state.current?.path ?? null;
+  const paths = [];
+  for (const entry of state.tree?.docs ?? []) {
+    const path = entry?.path;
+    if (typeof path !== "string" || path.length === 0) {
+      continue;
+    }
+    if (path === openPath || paths.includes(path)) {
+      continue;
+    }
+    paths.push(path);
+  }
+  return paths;
+}
+
+// Attaches a document to the conversation; attaching the open document or
+// repeating an attachment is a no-op, so the context never holds the same path
+// twice (ticket 0039).
+export function addAttachment(path) {
+  const openPath = state.current?.path ?? null;
+  const attachments = state.chat.attachments ?? (state.chat.attachments = []);
+  if (!path || path === openPath) {
+    return;
+  }
+  if (attachments.includes(path)) {
+    return;
+  }
+  attachments.push(path);
+}
+
+// Detaches a document: it leaves the conversation context and stops being part
+// of the next chat request (ticket 0039).
+export function removeAttachment(path) {
+  state.chat.attachments = (state.chat.attachments ?? []).filter((entry) => entry !== path);
+}
+
+// Checks or unchecks one checklist entry: a check attaches, an uncheck detaches
+// (ticket 0039).
+export function toggleAttachment(path, checked) {
+  if (checked) {
+    addAttachment(path);
+    return;
+  }
+  removeAttachment(path);
+}
+
+// The attachments a chat turn sends, open document first: the open document is
+// always the focus, the planned attachments are the still-existing ones after a
+// deletion or a rename, without duplicates (ticket 0039). Returns the paths to
+// send and the paths that no longer exist and were dropped.
+function planAttachments(docPath) {
+  const openPath = state.current?.path;
+  const known = new Set((state.tree?.docs ?? []).map((doc) => doc?.path));
+  const sent = [];
+  const dropped = [];
+  for (const path of state.chat.attachments ?? []) {
+    if (path === openPath || path === docPath) {
+      // The open document is the context on its own; it is never a duplicate
+      // attachment (ticket 0039).
+      continue;
+    }
+    if (sent.includes(path)) {
+      continue;
+    }
+    if (!known.has(path)) {
+      dropped.push(path);
+      continue;
+    }
+    sent.push(path);
+  }
+  return { sent, dropped };
+}
+
+// The visible note of a turn whose attachment no longer exists: the drop keeps
+// the context to documents that are still there, and the person is told which one
+// was left out (ticket 0039).
+function attachmentDropNote(paths) {
+  const list = paths.join(", ");
+  if (paths.length === 1) {
+    return `The attached document ${list} no longer exists and was left out of the context.`;
+  }
+  return `The attached documents ${list} no longer exist and were left out of the context.`;
+}
+
 // Rebuilds the chat panel from `state.chat`; the composer and the setup guidance
 // are replaced or hidden here, the transcript bubbles are rebuilt from the state.
 export function renderChat() {
@@ -190,6 +377,10 @@ export function renderChat() {
   }
   bindComposer(element);
 
+  const attachButton = element.querySelector("#chat-attach");
+  bindAttachButton(attachButton);
+
+  renderAttachments();
   renderNotice();
 }
 
@@ -250,7 +441,10 @@ export async function sendChat() {
     return;
   }
 
-  state.chat.messages.push({ role: "user", content: text });
+  const { sent, dropped } = planAttachments(docPath);
+  const content = dropped.length > 0 ? `${text}\n\n${attachmentDropNote(dropped)}` : text;
+
+  state.chat.messages.push({ role: "user", content });
   const assistantEntry = { role: "assistant", content: "", streamId: ++streamRequestId, complete: false };
   state.chat.messages.push(assistantEntry);
   if (input) {
@@ -260,7 +454,7 @@ export async function sendChat() {
   renderChat();
   autoScroll();
 
-  const outcome = await runAssistantStream(docPath, assistantEntry);
+  const outcome = await runAssistantStream(docPath, assistantEntry, sent);
   renderChat();
   autoScroll();
   if (outcome.error) {

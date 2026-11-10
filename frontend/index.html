@@ -28,6 +28,13 @@
           <p>Restart sdlc after setting them.</p>
         </div>
         <div id="chat-form" class="chat-form" hidden>
+          <div id="chat-attachments" class="chat-attachments">
+            <div id="chat-attachment-chips" class="chat-chips"></div>
+            <button type="button" id="chat-attach" class="chat-button chat-attach" aria-expanded="false" aria-controls="chat-attach-panel">Attach document</button>
+            <div id="chat-attach-panel" class="chat-attach-panel" hidden>
+              <ul id="chat-attach-list" class="chat-attach-list"></ul>
+            </div>
+          </div>
           <p id="chat-no-doc" class="chat-hint">Select a document to chat about.</p>
           <textarea id="chat-input" class="chat-input" rows="3" placeholder="Ask about the selected document..."></textarea>
           <div class="chat-actions">

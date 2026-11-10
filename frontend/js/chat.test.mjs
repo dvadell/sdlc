@@ -1,6 +1,6 @@
-//! Focused tests for the AI chat panel of the frontend (ticket 0038): the
-//! transcript bubbles, the unconfigured setup state, the composer rules and the
-//! stream outcomes.
+//! Focused tests for the AI chat panel of the frontend (tickets 0038 and 0039):
+//! the transcript bubbles, the unconfigured setup state, the composer rules, the
+//! stream outcomes and the document attachments.
 
 import { after, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
@@ -104,6 +104,15 @@ const hostElement = new FakeElement("p");
 hostElement.id = "chat-ai-host";
 const noticeElement = new FakeElement("p");
 noticeElement.id = "chat-notice";
+const chipsElement = new FakeElement("div");
+chipsElement.id = "chat-attachment-chips";
+const attachButtonElement = new FakeElement("button");
+attachButtonElement.id = "chat-attach";
+const attachPanelElement = new FakeElement("div");
+attachPanelElement.id = "chat-attach-panel";
+attachPanelElement.hidden = true;
+const attachListElement = new FakeElement("ul");
+attachListElement.id = "chat-attach-list";
 
 chatElement.appendChild(messagesElement);
 chatElement.appendChild(unconfiguredElement);
@@ -117,6 +126,10 @@ actionsElement.appendChild(sendElement);
 actionsElement.appendChild(stopElement);
 chatElement.appendChild(hostElement);
 chatElement.appendChild(noticeElement);
+chatElement.appendChild(chipsElement);
+chatElement.appendChild(attachButtonElement);
+chatElement.appendChild(attachPanelElement);
+chatElement.appendChild(attachListElement);
 
 globalThis.document = globalThis.document ?? {
   documentElement: { dataset: {} },
@@ -142,6 +155,14 @@ globalThis.document = globalThis.document ?? {
         return hostElement;
       case "#chat-notice":
         return noticeElement;
+      case "#chat-attachment-chips":
+        return chipsElement;
+      case "#chat-attach":
+        return attachButtonElement;
+      case "#chat-attach-panel":
+        return attachPanelElement;
+      case "#chat-attach-list":
+        return attachListElement;
       default:
         return null;
     }
@@ -177,7 +198,9 @@ after(() => {
   }
 });
 
-const { renderChat, sendChat } = await import("./chat.js");
+const { renderChat, sendChat, addAttachment, removeAttachment, availableAttachments } = await import(
+  "./chat.js"
+);
 
 function sseResponse(chunks, { close = true } = {}) {
   const encoder = new TextEncoder();
@@ -216,7 +239,8 @@ beforeEach(() => {
     version: "0",
   };
   state.current = { path: "sdlc/PRD.md", content: "# PRD\n", savedContent: "# PRD\n", hash: "hash-1" };
-  state.chat = { messages: [], streaming: false };
+  state.tree = null;
+  state.chat = { messages: [], streaming: false, attachments: [] };
 });
 
 function bubbles() {
@@ -232,7 +256,7 @@ function bubbles() {
 test("an unconfigured panel shows setup instructions and no send control", () => {
   state.config = { project_name: "sdlc", port: 9000, ai_configured: false, model: null, ai_host: null };
   state.current = { path: null, content: "", savedContent: "", hash: null };
-  state.chat = { messages: [], streaming: false };
+  state.chat = { messages: [], streaming: false, attachments: [] };
 
   renderChat();
 
@@ -279,8 +303,113 @@ test("enter sends the composer text and shift+enter keeps the newline", async ()
   const body = JSON.parse(fetchCalls[0].options.body);
   assert.deepEqual(body.messages, [{ role: "user", content: "Hello panel" }]);
   assert.equal(body.open_doc, "sdlc/PRD.md");
+  assert.deepEqual(body.attachments, []);
   assert.equal(inputElement.value, "");
   assert.equal(state.chat.streaming, false);
+});
+
+test("the request carries the open document and every attached document", async () => {
+  state.chat.attachments = ["sdlc/conventions.md"];
+  state.tree = { docs: [{ kind: "core", path: "sdlc/conventions.md", title: "Conventions" }] };
+  inputElement.value = "Hello panel";
+  await sendChat();
+
+  assert.equal(fetchCalls.length, 1);
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.equal(body.open_doc, "sdlc/PRD.md");
+  assert.deepEqual(body.attachments, ["sdlc/conventions.md"]);
+});
+
+test("attaching the open document or repeating an attachment is a no-op", () => {
+  addAttachment("sdlc/PRD.md");
+  addAttachment("sdlc/conventions.md");
+  addAttachment("sdlc/conventions.md");
+
+  assert.deepEqual(state.chat.attachments, ["sdlc/conventions.md"]);
+});
+
+test("removing an attachment omits it from the next request", async () => {
+  state.chat.attachments = ["sdlc/conventions.md"];
+  state.tree = { docs: [{ kind: "core", path: "sdlc/conventions.md", title: "Conventions" }] };
+  inputElement.value = "Hello panel";
+  await sendChat();
+  assert.deepEqual(JSON.parse(fetchCalls[0].options.body).attachments, ["sdlc/conventions.md"]);
+
+  removeAttachment("sdlc/conventions.md");
+  inputElement.value = "Hello again";
+  await sendChat();
+  assert.deepEqual(JSON.parse(fetchCalls[fetchCalls.length - 1].options.body).attachments, []);
+});
+
+test("a deleted attachment is dropped with a visible note and not sent", async () => {
+  state.chat.attachments = ["sdlc/features/gone.md"];
+  state.tree = { docs: [{ kind: "feature", path: "sdlc/features/export.md", title: "Export" }] };
+  inputElement.value = "Hello panel";
+  await sendChat();
+
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.deepEqual(body.attachments, []);
+  const userTurn = state.chat.messages.find((entry) => entry.role === "user");
+  assert.ok(userTurn.content.includes("sdlc/features/gone.md"));
+  assert.ok(userTurn.content.includes("left out of the context"));
+});
+
+test("the open document chip is fixed and attachment chips can be removed", () => {
+  state.chat.attachments = ["sdlc/conventions.md"];
+  renderChat();
+
+  const chips = document.querySelector("#chat-attachment-chips");
+  assert.equal(chips.children.length, 2);
+  assert.equal(chips.children[0].className, "chat-chip chat-chip-open");
+  const attachmentChip = chips.children[1];
+  assert.equal(attachmentChip.className, "chat-chip chat-chip-attachment");
+  attachmentChip.children[0].fire("click", {});
+  assert.deepEqual(state.chat.attachments, []);
+});
+
+test("the request never sends a duplicate attachment path", async () => {
+  state.chat.attachments = ["sdlc/conventions.md", "sdlc/conventions.md"];
+  state.tree = { docs: [{ kind: "core", path: "sdlc/conventions.md", title: "Conventions" }] };
+  inputElement.value = "Hello panel";
+  await sendChat();
+
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.deepEqual(body.attachments, ["sdlc/conventions.md"]);
+});
+
+test("switching documents keeps the attachments and updates the open chip", () => {
+  state.chat.attachments = ["sdlc/conventions.md"];
+  state.current.path = "sdlc/features/export.md";
+  renderChat();
+
+  const chips = document.querySelector("#chat-attachment-chips");
+  assert.equal(chips.children.length, 2);
+  assert.equal(chips.children[0].textContent, "sdlc/features/export.md");
+  assert.equal(chips.children[1].textContent, "sdlc/conventions.md");
+});
+
+test("the attach checklist lists the tree except the open document and toggles attachments", () => {
+  state.tree = {
+    docs: [
+      { kind: "core", path: "sdlc/PRD.md", title: "PRD" },
+      { kind: "feature", path: "sdlc/features/export.md", title: "Export" },
+      { kind: "feature", path: "sdlc/features/import.md", title: "Import" },
+    ],
+  };
+  renderChat();
+
+  const attachButton = document.querySelector("#chat-attach");
+  assert.equal(attachButton.hidden, false);
+  attachButton.fire("click", {});
+  const list = document.querySelector("#chat-attach-list");
+  assert.equal(list.children.length, 2);
+  const checkbox = list.children[0].children[0];
+  assert.equal(checkbox.type, "checkbox");
+  checkbox.checked = true;
+  checkbox.fire("change", { target: { checked: true } });
+
+  assert.deepEqual(availableAttachments(), ["sdlc/features/export.md", "sdlc/features/import.md"]);
+  assert.deepEqual(state.chat.attachments, ["sdlc/features/export.md"]);
 });
 
 test("shift+enter does not send, and enter twice quickly sends only one request", async () => {

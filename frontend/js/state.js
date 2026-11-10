@@ -17,10 +17,11 @@ export const state = {
   },
   // Whether the current document has unsaved edits.
   dirty: false,
-  // Chat panel state: the messages of the in-page transcript and whether a
-  // reply is streaming. The transcript lives here and nowhere else: no
-  // localStorage, no server history (ticket 0038).
-  chat: { messages: [], streaming: false },
+  // Chat panel state: the messages of the in-page transcript, whether a reply
+  // is streaming and the attached document paths of the conversation (ticket
+  // 0039). The transcript and the attachments live here and nowhere else: no
+  // localStorage, no server history, so a page reload starts a fresh conversation.
+  chat: { messages: [], streaming: false, attachments: [] },
   // The proposal currently awaiting a decision, if any.
   proposal: null,
 };

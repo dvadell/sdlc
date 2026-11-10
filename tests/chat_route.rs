@@ -5,14 +5,16 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
+use sdlc::chat::build;
 use sdlc::config::{CliArgs, Config};
+use sdlc::store::{DocPath, Document, content_hash};
 use sdlc::{ServerError, serve};
 use serde_json::json;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// A server bound to an ephemeral loopback port, stopped when the test ends.
@@ -562,5 +564,111 @@ async fn a_client_abort_during_the_stream_closes_the_connection() {
     // upstream request; the server task is stopped when the test server drops.
     drop(stream);
 
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn chat_with_attachments_sends_the_open_document_first_and_every_attachment() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let open = Document {
+        path: DocPath::parse("sdlc/features/export.md")
+            .expect("the open document path should be valid"),
+        content: "# Export\n".to_string(),
+        hash: content_hash(b"# Export\n"),
+    };
+    let conventions = Document {
+        path: DocPath::parse("sdlc/conventions.md").expect("the attachment path should be valid"),
+        content: "# Conventions\n".to_string(),
+        hash: content_hash(b"# Conventions\n"),
+    };
+    let messages = build(&open, &[conventions], vec![]);
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "model": "gpt-4o",
+            "stream": true,
+            "messages": [ { "role": "system", "content": messages[0].content.clone() } ],
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    write(&dir, "sdlc/conventions.md", b"# Conventions\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_body(
+            user_message("hello"),
+            "sdlc/features/export.md",
+            json!(["sdlc/conventions.md"]),
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        concat!(
+            "event: delta\ndata: {\"text\":\"Hello\"}\n\n",
+            "event: done\ndata: {}\n\n",
+        )
+    );
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn a_missing_attachment_is_skipped_and_the_reply_still_streams() {
+    let mock_server = MockServer::start().await;
+    let mock = Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\
+                 data: [DONE]\n\n"
+                    .to_vec(),
+                "text/event-stream",
+            ),
+        );
+    mock.mount(&mock_server).await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_body(
+            user_message("hello"),
+            "sdlc/features/export.md",
+            json!(["sdlc/features/gone.md"]),
+        ))
+        .await;
+
+    // The missing attachment is skipped by the prompt builder, so the reply
+    // still streams instead of failing the turn.
+    assert_eq!(response.status, 200);
+    assert!(response.body.contains("event: done"));
     mock_server.verify().await;
 }
