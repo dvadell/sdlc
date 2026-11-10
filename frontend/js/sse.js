@@ -73,7 +73,7 @@ function parseFrame(frame) {
 export async function* readSse(response, signal) {
   // A bodyless response (for example a 204) has nothing to read; end cleanly
   // instead of failing on a missing reader.
-  if (response.body == null) {
+  if (response.body === null) {
     return;
   }
   const reader = response.body.getReader();
