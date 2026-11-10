@@ -306,4 +306,16 @@ mod tests {
             "event: error\ndata: {\"code\":\"upstream_error\",\"message\":\"chat upstream returned status 500\"}\n\n"
         );
     }
+
+    #[test]
+    fn error_frame_of_an_upstream_stream_error_uses_the_stream_error_code() {
+        let error = ChatError::UpstreamError {
+            message: "boom".to_string(),
+        };
+
+        assert_eq!(
+            frame_error(&error),
+            "event: error\ndata: {\"code\":\"upstream_stream_error\",\"message\":\"chat upstream returned an error: boom\"}\n\n"
+        );
+    }
 }
