@@ -33,6 +33,10 @@ pub enum ChatError {
     #[error("chat upstream connection failed")]
     Network,
 
+    /// The upstream stream ended before the reply finished.
+    #[error("chat upstream stream ended before the reply was complete")]
+    Truncated,
+
     /// The upstream response could not be understood.
     #[error("chat upstream returned an invalid response: {message}")]
     InvalidResponse {

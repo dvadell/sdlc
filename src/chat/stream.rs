@@ -29,7 +29,7 @@ where
                 // The source ended without the `[DONE]` sentinel, so the reply
                 // was truncated before the upstream could finish it; report that
                 // as a typed error instead of ending the stream cleanly.
-                return Some((Err(ChatError::Network), None));
+                return Some((Err(ChatError::Truncated), None));
             };
             let outcome: Option<Result<String, ChatError>> = match item {
                 Err(err) => Some(Err(event_error(&err))),
@@ -222,19 +222,25 @@ mod tests {
 
     #[tokio::test]
     async fn error_object_yields_an_upstream_error() {
-        let chunks = vec![data_event(
-            r#"{"error":{"message":"boom","type":"server_error"}}"#,
-        )];
+        let chunks = vec![
+            data_event(r#"{"error":{"message":"boom","type":"server_error"}}"#),
+            "data: [DONE]\n\n".to_string(),
+        ];
         let deltas = collect(&chunks).await;
 
+        assert_eq!(deltas.len(), 1);
         assert!(matches!(deltas[0], Err(ChatError::UpstreamError { .. })));
     }
 
     #[tokio::test]
     async fn upstream_error_as_bare_string_yields_an_upstream_error() {
-        let chunks = vec![data_event(r#"{"error":"boom"}"#)];
+        let chunks = vec![
+            data_event(r#"{"error":"boom"}"#),
+            "data: [DONE]\n\n".to_string(),
+        ];
         let deltas = collect(&chunks).await;
 
+        assert_eq!(deltas.len(), 1);
         assert!(matches!(deltas[0], Err(ChatError::UpstreamError { .. })));
     }
 
@@ -248,7 +254,7 @@ mod tests {
         // cleanly after the partial delta.
         assert_eq!(deltas.len(), 2);
         assert!(matches!(&deltas[0], Ok(delta) if delta == "Hello"));
-        assert!(matches!(deltas[1], Err(ChatError::Network)));
+        assert!(matches!(deltas[1], Err(ChatError::Truncated)));
     }
 
     #[tokio::test]
@@ -270,7 +276,7 @@ mod tests {
         // An empty stream cannot have ended with the `[DONE]` sentinel, so the
         // truncation is reported as a typed error instead of a clean end.
         assert_eq!(deltas.len(), 1);
-        assert!(matches!(deltas[0], Err(ChatError::Network)));
+        assert!(matches!(deltas[0], Err(ChatError::Truncated)));
     }
 
     #[tokio::test]
