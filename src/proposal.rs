@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use similar::TextDiff;
 use thiserror::Error;
 
-use crate::chat::Block;
+use crate::chat::{Block, TicketContext};
 use crate::store::{DocKind, DocPath, DocStore, Expectation, StoreError};
 use uuid::Uuid;
 
@@ -163,9 +163,18 @@ impl ProposalService {
     /// diff of every change is computed from the content read here, so a change
     /// is never diffed against a second read of the same file.
     ///
+    /// When the ticket generation context of ticket 0049 is given, a proposed
+    /// ticket must live in the epic the person chose, so the path has to sit under
+    /// that epic's `tickets/` directory; the path, not the front matter, selects
+    /// the epic (tickets 0048 and 0049).
+    ///
     /// The proposal is stored in memory and returned; it only becomes real when
     /// a later ticket accepts it.
-    pub async fn create(&self, blocks: &[Block]) -> Result<Proposal, ProposalError> {
+    pub async fn create(
+        &self,
+        blocks: &[Block],
+        ticket_context: Option<&TicketContext>,
+    ) -> Result<Proposal, ProposalError> {
         let mut changes: Vec<Change> = Vec::new();
         let mut seen: HashSet<DocPath> = HashSet::new();
 
@@ -175,6 +184,20 @@ impl ProposalService {
                 .map_err(|_| ProposalError::InvalidPath(raw_path.to_string()))?;
             if !seen.insert(path.clone()) {
                 return Err(ProposalError::DuplicatePath(raw_path.to_string()));
+            }
+
+            if let Some(context) = ticket_context {
+                // A ticket drafted in a ticket-generation turn belongs to the epic
+                // the person chose, so a proposal outside that epic is refused
+                // before anything is classified or stored.
+                if crate::store::layout::kind(path.as_path()) == Some(DocKind::Ticket)
+                    && context.epic.is_some()
+                {
+                    let selected = context.epic.as_deref().expect("the epic is set");
+                    if crate::store::layout::epic_of(path.as_path()) != Some(selected) {
+                        return Err(ProposalError::InvalidPath(raw_path.to_string()));
+                    }
+                }
             }
 
             let (action, new_content, base_hash, base_content) = match block {
@@ -566,7 +589,7 @@ mod tests {
     async fn empty_block_list_is_rejected() {
         let (_dir, service) = service_in_temp().await;
 
-        let error = service.create(&[]).await.expect_err("empty proposal");
+        let error = service.create(&[], None).await.expect_err("empty proposal");
 
         assert!(matches!(error, ProposalError::EmptyProposal));
     }
@@ -576,7 +599,7 @@ mod tests {
         let (_dir, service) = service_in_temp().await;
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
 
         assert_eq!(proposal.changes.len(), 1);
         let change = &proposal.changes[0];
@@ -592,7 +615,7 @@ mod tests {
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
 
         let change = &proposal.changes[0];
         assert_eq!(change.action, Action::Modify);
@@ -612,7 +635,7 @@ mod tests {
             "# sdlc\n\n## Commands\n\n- run the tests\n",
         )];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
 
         let change = &proposal.changes[0];
         assert_eq!(change.action, Action::Modify);
@@ -635,7 +658,7 @@ mod tests {
         let (_dir, service) = service_in_temp().await;
 
         let error = service
-            .create(&[delete_block("sdlc/features/nope.md")])
+            .create(&[delete_block("sdlc/features/nope.md")], None)
             .await
             .expect_err("deleting a missing file");
 
@@ -648,7 +671,7 @@ mod tests {
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [delete_block("sdlc/features/export.md")];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
 
         let change = &proposal.changes[0];
         assert_eq!(change.action, Action::Delete);
@@ -667,7 +690,10 @@ mod tests {
             write_block("../AGENTS.md", "# Escape\n"),
         ];
 
-        let error = service.create(&blocks).await.expect_err("invalid proposal");
+        let error = service
+            .create(&blocks, None)
+            .await
+            .expect_err("invalid proposal");
 
         assert!(matches!(error, ProposalError::InvalidPath(_)));
     }
@@ -683,7 +709,7 @@ mod tests {
         ];
 
         let error = service
-            .create(&blocks)
+            .create(&blocks, None)
             .await
             .expect_err("the proposal should be rejected");
 
@@ -701,7 +727,7 @@ mod tests {
             "",
         ] {
             let error = service
-                .create(&[write_block(raw, "# No\n")])
+                .create(&[write_block(raw, "# No\n")], None)
                 .await
                 .expect_err("invalid path");
 
@@ -721,7 +747,7 @@ mod tests {
         ];
 
         let error = service
-            .create(&blocks)
+            .create(&blocks, None)
             .await
             .expect_err("duplicate proposal");
 
@@ -734,7 +760,7 @@ mod tests {
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
 
         let change = &proposal.changes[0];
         assert_eq!(change.action, Action::Modify);
@@ -749,11 +775,11 @@ mod tests {
     async fn proposal_ids_are_unique() {
         let (_dir, service) = service_in_temp().await;
         let first = service
-            .create(&[write_block("sdlc/PRD.md", "# First\n")])
+            .create(&[write_block("sdlc/PRD.md", "# First\n")], None)
             .await
             .expect("first proposal");
         let second = service
-            .create(&[write_block("sdlc/PRD.md", "# Second\n")])
+            .create(&[write_block("sdlc/PRD.md", "# Second\n")], None)
             .await
             .expect("second proposal");
 
@@ -770,7 +796,7 @@ mod tests {
             "# New\n\nBody line\n",
         )];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         let change = &proposal.changes[0];
 
         assert_eq!(change.action, Action::Modify);
@@ -805,10 +831,13 @@ mod tests {
     async fn create_diff_adds_lines_and_delete_diff_removes_them() {
         let (_dir, service) = service_in_temp().await;
         let created = service
-            .create(&[write_block(
-                "sdlc/features/export.md",
-                "# Export\n\nHello\n",
-            )])
+            .create(
+                &[write_block(
+                    "sdlc/features/export.md",
+                    "# Export\n\nHello\n",
+                )],
+                None,
+            )
             .await
             .expect("create proposal");
         let created_change = &created.changes[0];
@@ -830,7 +859,7 @@ mod tests {
         let (dir, service) = service_in_temp().await;
         feature_file(&dir, "export.md", "# Export\n");
         let deleted = service
-            .create(&[delete_block("sdlc/features/export.md")])
+            .create(&[delete_block("sdlc/features/export.md")], None)
             .await
             .expect("delete proposal");
 
@@ -851,7 +880,7 @@ mod tests {
         let changed = base.replacen("line 250\n", "line 250 changed\n", 1);
         let blocks = [write_block("sdlc/features/export.md", &changed)];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         let change = &proposal.changes[0];
 
         assert_eq!(change.action, Action::Modify);
@@ -870,7 +899,7 @@ mod tests {
             delete_block("sdlc/features/old.md"),
         ];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         let report = service.accept(&proposal.id).await.expect("the accept");
 
         assert_eq!(
@@ -903,7 +932,7 @@ mod tests {
         let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         std::fs::write(
             dir.path().join("sdlc/features/export.md"),
             "# Changed externally\n",
@@ -926,7 +955,7 @@ mod tests {
         let (dir, _store, service) = service_in_temp_with_store().await;
         std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("feature dir");
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         std::fs::write(dir.path().join("sdlc/features/export.md"), "# External\n")
             .expect("write the feature");
 
@@ -945,7 +974,7 @@ mod tests {
         let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         let proposal = service
-            .create(&[delete_block("sdlc/features/export.md")])
+            .create(&[delete_block("sdlc/features/export.md")], None)
             .await
             .expect("the proposal");
         std::fs::write(
@@ -968,7 +997,7 @@ mod tests {
         let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         std::fs::remove_file(dir.path().join("sdlc/features/export.md")).expect("remove");
 
         let error = service.accept(&proposal.id).await.expect_err("the accept");
@@ -994,7 +1023,7 @@ mod tests {
             write_block("sdlc/PRD.md", "# Fresh PRD\n"),
             write_block("sdlc/features/gamma.md", "# Gamma v2\n"),
         ];
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         let feature_dir = dir.path().join("sdlc/features");
         std::fs::set_permissions(&feature_dir, std::fs::Permissions::from_mode(0o500))
             .expect("make the feature dir read-only");
@@ -1036,7 +1065,7 @@ mod tests {
         write_file(&dir, "sdlc/PRD.md", PRD_WITH_MARKERS);
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         let report = service.accept(&proposal.id).await.expect("the accept");
 
         assert_eq!(report.applied, vec!["sdlc/features/export.md".to_string()]);
@@ -1067,7 +1096,7 @@ mod tests {
         let proposed = "# Product Requirements Document\n\n## Purpose\n\nWrite the purpose.\n\n<!-- sdlc:feature-index:start -->\n<!-- sdlc:feature-index:end -->\n";
         let blocks = [write_block("sdlc/PRD.md", proposed)];
 
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         let report = service.accept(&proposal.id).await.expect("the accept");
 
         assert!(report.warnings.is_empty());
@@ -1080,11 +1109,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn two_ticket_creates_in_the_chosen_epic_build_a_proposal_of_creates() {
+        let (dir, _store, service) = service_in_temp_with_store().await;
+        feature_file(&dir, "export.md", "# Export\n");
+        let context = TicketContext {
+            feature: Some("export".to_string()),
+            epic: Some("0001-foundation".to_string()),
+        };
+        let blocks = [
+            write_block(
+                "sdlc/epics/0001-foundation/tickets/0001-add-export.md",
+                "# 0001: Add export\n",
+            ),
+            write_block(
+                "sdlc/epics/0001-foundation/tickets/0002-add-import.md",
+                "# 0002: Add import\n",
+            ),
+        ];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(proposal.changes.len(), 2);
+        assert_eq!(proposal.changes[0].action, Action::Create);
+        assert_eq!(
+            proposal.changes[0].path.as_path().display().to_string(),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+        assert_eq!(proposal.changes[1].action, Action::Create);
+        assert_eq!(
+            proposal.changes[1].path.as_path().display().to_string(),
+            "sdlc/epics/0001-foundation/tickets/0002-add-import.md"
+        );
+        assert!(service.get(&proposal.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_ticket_draft_outside_the_chosen_epic_is_rejected() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        feature_file(&_dir, "export.md", "# Export\n");
+        let context = TicketContext {
+            feature: Some("export".to_string()),
+            epic: Some("0001-foundation".to_string()),
+        };
+        let blocks = [write_block(
+            "sdlc/epics/0002-platform/tickets/0001-add-export.md",
+            "# 0001: Add export\n",
+        )];
+
+        let error = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect_err("the proposal");
+
+        assert!(matches!(error, ProposalError::InvalidPath(_)));
+    }
+
+    #[tokio::test]
     async fn reject_does_not_touch_disk_and_drops_the_proposal() {
         let (dir, _store, service) = service_in_temp_with_store().await;
         feature_file(&dir, "export.md", "# Export\n");
         let blocks = [write_block("sdlc/features/export.md", "# Exported\n")];
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         assert!(service.get(&proposal.id).is_some());
 
         service.reject(&proposal.id).expect("the reject");
@@ -1111,7 +1199,7 @@ mod tests {
         let (_dir, _store, service) = service_in_temp_with_store().await;
         std::fs::create_dir_all(_dir.path().join("sdlc/features")).expect("feature dir");
         let blocks = [write_block("sdlc/features/export.md", "# Export\n")];
-        let proposal = service.create(&blocks).await.expect("the proposal");
+        let proposal = service.create(&blocks, None).await.expect("the proposal");
         let report = service.accept(&proposal.id).await.expect("the accept");
         assert_eq!(report.applied, vec!["sdlc/features/export.md".to_string()]);
 

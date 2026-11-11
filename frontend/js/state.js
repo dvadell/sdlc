@@ -21,7 +21,7 @@ export const state = {
   // is streaming and the attached document paths of the conversation (ticket
   // 0039). The transcript and the attachments live here and nowhere else: no
   // localStorage, no server history, so a page reload starts a fresh conversation.
-  chat: { messages: [], streaming: false, attachments: [] },
+  chat: { messages: [], streaming: false, attachments: [], ticketContext: null },
   // The proposal currently awaiting a decision, if any.
   proposal: null,
 };

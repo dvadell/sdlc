@@ -1,4 +1,4 @@
-//! Tests for the built-in prompt catalog of the chat panel (ticket 0046).
+//! Tests for the built-in prompt catalog of the chat panel (tickets 0046 and 0049).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -23,7 +23,7 @@ test("every prompt carries an id, a short label, a description, editable text an
 
 test("the ready prompts ask for full files in FILE blocks and never for patches", () => {
   const ready = enabledPrompts();
-  assert.equal(ready.length, 5);
+  assert.equal(ready.length, 6);
   for (const prompt of ready) {
     assert.ok(
       prompt.text.includes("FILE"),
@@ -43,6 +43,7 @@ test("the ready prompts ask for full files in FILE blocks and never for patches"
 test("the documentation jobs attach the documents of the ticket", () => {
   const byId = new Map(PROMPTS.map((prompt) => [prompt.id, prompt]));
   assert.deepEqual(byId.get("split-prd").attachments, ["sdlc/PRD.md"]);
+  assert.deepEqual(byId.get("generate-tickets").attachments, ["sdlc/conventions.md"]);
   assert.deepEqual(byId.get("feature-spec").attachments, ["sdlc/PRD.md"]);
   assert.deepEqual(byId.get("adr").attachments, ["sdlc/architecture.md", "sdlc/conventions.md"]);
   assert.deepEqual(
@@ -64,18 +65,34 @@ test("the trim prompt asks for short actionable rules and the full new file", ()
   assert.ok(trim.text.includes("=== FILE: AGENTS.md ==="));
 });
 
-test("the ticket-generation prompt is disabled until ticket 0049 exists", () => {
+test("the ticket-generation prompt is enabled and asks for one ticket file per ticket", () => {
   const generation = promptById("generate-tickets");
   assert.ok(generation);
-  assert.equal(generation.disabled, true);
+  assert.ok(enabledPrompts().includes(generation));
   assert.ok(generation.text.length > 0);
-  assert.deepEqual(generation.attachments, []);
+  assert.deepEqual(generation.attachments, ["sdlc/conventions.md"]);
+  assert.ok(generation.text.includes("Generate one ticket file per unit of work"));
+  assert.ok(generation.text.includes("=== FILE: sdlc/epics/<epic>/tickets/<kebab-slug>.md ==="));
+  assert.ok(generation.text.includes("=== END FILE ==="));
+});
+
+test("the ticket-generation prompt forbids numeric prefixes and the epic front matter key", () => {
+  const generation = promptById("generate-tickets");
+  assert.ok(generation.text.includes("Do not use a numeric ticket prefix"));
+  assert.ok(generation.text.includes("Do not add an `epic` key"));
+});
+
+test("the ticket-generation prompt asks for the title without a number and the ticket sections", () => {
+  const generation = promptById("generate-tickets");
+  assert.ok(generation.text.includes("# <Title>"));
+  assert.ok(generation.text.includes("Description, Acceptance criteria, Tests, Gotchas and Dependencies"));
+  assert.ok(generation.text.includes("Write dependencies as ticket titles in the body"));
 });
 
 test("promptById returns null for an unknown id", () => {
   assert.equal(promptById("nonexistent"), null);
 });
 
-test("the disabled ticket prompt keeps a tooltip explaining the wait", () => {
+test("the ticket-generation tooltip explains what to select", () => {
   assert.ok(DISABLED_PROMPT_HINT.length > 0);
 });

@@ -586,7 +586,7 @@ async fn chat_with_attachments_sends_the_open_document_first_and_every_attachmen
         content: "# Conventions\n".to_string(),
         hash: content_hash(b"# Conventions\n"),
     };
-    let messages = build(&open, &[conventions], vec![]);
+    let messages = build(&open, &[conventions], vec![], None);
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .and(body_partial_json(json!({
@@ -641,7 +641,7 @@ async fn a_missing_attachment_is_skipped_and_the_reply_still_streams() {
         content: "# Export\n".to_string(),
         hash: content_hash(b"# Export\n"),
     };
-    let messages = build(&open, &[], vec![]);
+    let messages = build(&open, &[], vec![], None);
     let mock = Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .and(body_partial_json(json!({

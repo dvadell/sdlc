@@ -6,6 +6,7 @@ import { ApiError } from "./api.js";
 import { readSse } from "./sse.js";
 import { showProposal } from "./diff.js";
 import { PROMPTS, DISABLED_PROMPT_HINT } from "./prompts.js";
+import { statusKindOf } from "./statuses.js";
 
 // The abort controller of the reply in flight; null when the panel is idle.
 let abortController = null;
@@ -90,7 +91,8 @@ async function runAssistantStream(docPath, assistantEntry, attachments) {
 // documents, and nothing else in scope. The server reads the document contents
 // from disk, so the browser never sends document text of its own; the open
 // document is always part of the context, the attachments ride along (ticket
-// 0039).
+// 0039). A ticket-generation turn adds the optional ticket context of ticket
+// 0049: the feature slug and the epic directory the next tickets are drafted for.
 async function postChat(docPath, attachments, signal) {
   const history = state.chat.messages
     .filter(
@@ -100,10 +102,15 @@ async function postChat(docPath, attachments, signal) {
         entry.content.length > 0,
     )
     .map((entry) => ({ role: entry.role, content: entry.content }));
+  const body = { messages: history, open_doc: docPath, attachments };
+  const context = ticketContext();
+  if (context) {
+    body.ticket_context = context;
+  }
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages: history, open_doc: docPath, attachments }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!response.ok) {
@@ -291,6 +298,49 @@ export function addAttachment(path) {
   attachments.push(path);
 }
 
+// The feature slug of the open feature document, or null when the open
+// document is not a feature (ticket 0049).
+export function selectedFeature() {
+  if (statusKindOf(state.current?.path) !== "feature") {
+    return null;
+  }
+  const segments = String(state.current?.path ?? "").replace(/^\//, "").split("/");
+  const file = segments[segments.length - 1] ?? "";
+  const slug = file.endsWith(".md") ? file.slice(0, -3) : file;
+  return slug.length > 0 ? slug : null;
+}
+
+// The epic directory of the open epic document or of an open ticket, or null when
+// the open document is neither (ticket 0049).
+export function selectedEpic() {
+  const path = state.current?.path;
+  if (typeof path !== "string" || path.length === 0) {
+    return null;
+  }
+  const segments = path.replace(/^\//, "").split("/");
+  const isEpicDocument =
+    segments[0] === "sdlc" && segments[1] === "epics" && segments[segments.length - 1] === "description.md";
+  const isTicket = segments[0] === "sdlc" && segments[1] === "epics" && segments[3] === "tickets";
+  if (!isEpicDocument && !isTicket) {
+    return null;
+  }
+  const epic = segments[2] ?? "";
+  return epic.length > 0 ? epic : null;
+}
+
+// The ticket-generation context: the feature slug and the epic directory the
+// next tickets are drafted for, or null while the generation needs both (ticket
+// 0049). The chosen values win, so a feature and an epic picked for the work are
+// offered before the open document is asked for them.
+export function ticketContext() {
+  const feature = state.chat.ticketContext?.feature ?? selectedFeature();
+  const epic = state.chat.ticketContext?.epic ?? selectedEpic();
+  if (feature === null || epic === null) {
+    return null;
+  }
+  return { feature, epic };
+}
+
 // Fills the composer with one built-in prompt and attaches its documents; the
 // person edits the text and presses Enter or Send when ready (ticket 0046). The
 // click only fills: it never sends, so the prompt stays adjustable.
@@ -308,6 +358,16 @@ export function applyPrompt(prompt) {
   input.focus();
   for (const path of prompt.attachments ?? []) {
     addAttachment(path);
+  }
+  if (prompt.id === "generate-tickets") {
+    // The ticket-generation prompt adds the epic document of the chosen epic; the
+    // feature document is the open document when it is a feature, so the dedup of
+    // ticket 0039 keeps it from being sent twice.
+    const context = ticketContext();
+    const epic = context?.epic ?? selectedEpic();
+    if (epic) {
+      addAttachment(`sdlc/epics/${epic}/description.md`);
+    }
   }
 }
 
@@ -436,8 +496,11 @@ function renderPrompts(container) {
     button.className = "chat-button chat-prompt";
     button.id = `chat-prompt-${prompt.id}`;
     button.textContent = prompt.label;
-    button.disabled = Boolean(prompt.disabled);
-    button.title = prompt.disabled ? DISABLED_PROMPT_HINT : prompt.title;
+    // The ticket-generation prompt only appears when a feature and an epic are
+    // selected (ticket 0049); the other built-in prompts are always ready.
+    const contextReady = prompt.id !== "generate-tickets" || ticketContext() !== null;
+    button.disabled = Boolean(prompt.disabled) || !contextReady;
+    button.title = prompt.disabled || !contextReady ? DISABLED_PROMPT_HINT : prompt.title;
     button.addEventListener("click", () => applyPrompt(prompt));
     container.appendChild(button);
   }

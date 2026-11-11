@@ -1,12 +1,13 @@
-//! The built-in documentation prompts of the chat panel (ticket 0046).
+//! The built-in documentation prompts of the chat panel (tickets 0046 and 0049).
 //!
 //! The whole prompt catalog lives here; the server has no prompt catalog. Each
 //! prompt carries the text the person can edit and the documents it attaches, so
 //! one click fills the composer and the person adjusts before sending.
 
-// The tooltip of the one prompt that is not wired yet; ticket 0049 replaces this
-// disabled entry with the real ticket-generation prompt.
-export const DISABLED_PROMPT_HINT = "Ticket generation from a feature arrives in sdlc ticket 0049.";
+// The tooltip of a built-in prompt that is not usable right now; the
+// ticket-generation prompt waits for a selected feature and a selected epic
+// (ticket 0049).
+export const DISABLED_PROMPT_HINT = "Select a feature and an epic to generate tickets from.";
 
 // A built-in prompt: the id the panel keys on, a short label, the short
 // description shown as the button title, the prompt text, and the documents it
@@ -103,10 +104,23 @@ export const PROMPTS = [
   {
     id: "generate-tickets",
     label: "Generate tickets",
-    title: "Ticket generation from a feature arrives in sdlc ticket 0049.",
-    text: "Generating tickets from this feature will be wired in sdlc ticket 0049; it is not available yet.",
-    attachments: [],
-    disabled: true,
+    title: "Generate ticket files from this feature into the chosen epic.",
+    text: [
+      "Generate one ticket file per unit of work from this feature and propose them under the chosen epic.",
+      "",
+      "The feature is the open feature document, sdlc/features/<feature>.md, and the epic is the chosen epic, sdlc/epics/<epic>/description.md; when either is missing, explain what to select before proposing anything.",
+      "",
+      "For every unit of work, propose one ticket file as its own FILE block under sdlc/epics/<epic>/tickets/<kebab-slug>.md:",
+      "",
+      "=== FILE: sdlc/epics/<epic>/tickets/<kebab-slug>.md ===",
+      "The complete new ticket: the H1 `# <Title>` without a number, then the sections Description, Acceptance criteria, Tests, Gotchas and Dependencies, with the optional front matter `feature: <slug>`, `status: todo` and `depends_on: []`. Write dependencies as ticket titles in the body, because ticket numbers do not exist yet.",
+      "=== END FILE ===",
+      "",
+      "Do not use a numeric ticket prefix in the path; ticket numbers are assigned after the proposal. Do not add an `epic` key to the front matter; the path determines the epic.",
+      "",
+      "Keep the tickets small and one per unit of work. Ask clarifying questions instead of guessing. Propose full files, not patches.",
+    ].join("\n"),
+    attachments: ["sdlc/conventions.md"],
   },
 ];
 
@@ -115,8 +129,8 @@ export function promptById(id) {
   return PROMPTS.find((prompt) => prompt.id === id) ?? null;
 }
 
-// The built-in prompts that are ready to use; the disabled ticket-generation
-// entry is left out until ticket 0049 wires it (ticket 0046).
+// The built-in prompts that are ready to use; the ticket-generation prompt is
+// gated on a selected feature and a selected epic instead (ticket 0049).
 export function enabledPrompts() {
   return PROMPTS.filter((prompt) => !prompt.disabled);
 }

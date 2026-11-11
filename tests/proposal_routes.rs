@@ -104,7 +104,7 @@ impl TestServer {
     async fn seed(&self, blocks: &[Block]) -> String {
         let proposal = self
             .proposals
-            .create(blocks)
+            .create(blocks, None)
             .await
             .expect("the proposal should build");
 

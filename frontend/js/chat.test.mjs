@@ -326,6 +326,28 @@ test("the request carries the open document and every attached document", async 
   assert.deepEqual(body.attachments, ["sdlc/conventions.md"]);
 });
 
+test("a ticket-generation request carries the ticket context and no other context", async () => {
+  state.chat.ticketContext = { feature: "export", epic: "0001-foundation" };
+  state.current = { path: "sdlc/features/export.md", content: "# Export\n", savedContent: "# Export\n", hash: "hash-1" };
+  response = sseResponse(["event: done\ndata: {}\n\n"]);
+  inputElement.value = "Generate the tickets";
+  await sendChat();
+
+  assert.equal(fetchCalls.length, 1);
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.deepEqual(body.ticket_context, { feature: "export", epic: "0001-foundation" });
+});
+
+test("the chat request carries no ticket context while no feature and epic are selected", async () => {
+  state.current = { path: "sdlc/features/export.md", content: "# Export\n", savedContent: "# Export\n", hash: "hash-1" };
+  response = sseResponse(["event: done\ndata: {}\n\n"]);
+  inputElement.value = "Hello panel";
+  await sendChat();
+
+  const body = JSON.parse(fetchCalls[0].options.body);
+  assert.equal(body.ticket_context, undefined);
+});
+
 test("attaching the open document or repeating an attachment is a no-op", () => {
   addAttachment("sdlc/PRD.md");
   addAttachment("sdlc/conventions.md");
@@ -558,7 +580,7 @@ test("the auto-scroll only runs while the person is already at the bottom", asyn
   assert.equal(messagesElement.scrollTop, 1000);
 });
 
-test("the built-in prompt row renders one button per prompt with a title and disables the ticket prompt", () => {
+test("the built-in prompt row renders one button per prompt with a title and gates the ticket prompt", () => {
   renderChat();
 
   const prompts = document.querySelector("#chat-prompts");
@@ -566,12 +588,24 @@ test("the built-in prompt row renders one button per prompt with a title and dis
   assert.equal(prompts.children.length, PROMPTS.length);
   const generation = prompts.children.find((child) => child.id === "chat-prompt-generate-tickets");
   assert.ok(generation);
+  // Without a selected feature and epic the ticket generation stays disabled and
+  // explains what to choose (ticket 0049).
   assert.equal(generation.disabled, true);
   assert.ok(String(generation.title).length > 0);
   const split = prompts.children.find((child) => child.id === "chat-prompt-split-prd");
   assert.ok(split);
   assert.equal(split.disabled, false);
   assert.ok(String(split.title).length > 0);
+});
+
+test("the ticket-generation prompt is enabled once a feature and an epic are selected", () => {
+  state.chat.ticketContext = { feature: "export", epic: "0001-foundation" };
+  renderChat();
+
+  const prompts = document.querySelector("#chat-prompts");
+  const generation = prompts.children.find((child) => child.id === "chat-prompt-generate-tickets");
+  assert.ok(generation);
+  assert.equal(generation.disabled, false);
 });
 
 test("clicking a built-in prompt fills the composer and attaches its documents without sending", () => {
@@ -608,9 +642,45 @@ test("clicking a built-in prompt twice does not duplicate the attachments", () =
   ]);
 });
 
-test("the enabled built-in prompts are the five that are ready to use", () => {
+test("the enabled built-in prompts are all six that are ready to use", () => {
   assert.equal(PROMPTS.length, 6);
-  assert.equal(enabledPrompts().length, 5);
-  assert.equal(promptById("generate-tickets")?.disabled, true);
+  assert.equal(enabledPrompts().length, 6);
+  assert.ok(enabledPrompts().some((prompt) => prompt.id === "generate-tickets"));
   assert.ok(DISABLED_PROMPT_HINT.length > 0);
+});
+
+test("clicking the ticket-generation prompt fills the composer and attaches the conventions", () => {
+  state.chat.attachments = [];
+  state.current = { path: "sdlc/features/export.md", content: "# Export\n", savedContent: "# Export\n", hash: "hash-1" };
+  renderChat();
+
+  const prompts = document.querySelector("#chat-prompts");
+  const generation = prompts.children.find((child) => child.id === "chat-prompt-generate-tickets");
+  assert.ok(generation);
+  generation.fire("click", {});
+
+  assert.equal(inputElement.value, promptById("generate-tickets").text);
+  assert.deepEqual(state.chat.attachments, ["sdlc/conventions.md"]);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("clicking the ticket-generation prompt with a chosen epic attaches the epic document", () => {
+  state.chat.attachments = [];
+  state.chat.ticketContext = { feature: "export", epic: "0001-foundation" };
+  state.current = { path: "sdlc/features/export.md", content: "# Export\n", savedContent: "# Export\n", hash: "hash-1" };
+  renderChat();
+
+  const prompts = document.querySelector("#chat-prompts");
+  const generation = prompts.children.find((child) => child.id === "chat-prompt-generate-tickets");
+  assert.ok(generation);
+  // The chosen feature and epic make the ticket-generation prompt ready (ticket 0049).
+  assert.equal(generation.disabled, false);
+  generation.fire("click", {});
+
+  assert.equal(inputElement.value, promptById("generate-tickets").text);
+  // The prompt adds the conventions and the epic document of the chosen epic; the
+  // feature document is the open document when it is a feature, so the dedup of the
+  // open document keeps it from being sent twice.
+  assert.deepEqual(state.chat.attachments, ["sdlc/conventions.md", "sdlc/epics/0001-foundation/description.md"]);
+  assert.equal(fetchCalls.length, 0);
 });

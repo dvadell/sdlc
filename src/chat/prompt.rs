@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use crate::chat::TicketContext;
 use crate::chat::client::ChatMessage;
 use crate::store::Document;
 use crate::store::path::DocPath;
@@ -32,6 +33,20 @@ A FILE block carries the full new content, not a patch; the server computes the 
 
 Ask the person clarifying questions instead of guessing."#;
 
+/// The section of the assembled system prompt that carries the ticket generation
+/// context of ticket 0049: the feature and the epic the next tickets are drafted
+/// for, the per-ticket file shape, the no-number rule and the dependency wording.
+fn ticket_context_section(context: &TicketContext) -> String {
+    let feature = context.feature.as_deref().unwrap_or("<feature>");
+    let epic = context.epic.as_deref().unwrap_or("<epic>");
+
+    format!(
+        "The ticket generation context of this conversation: the person drafts tickets for the feature \"{feature}\" in the epic \"{epic}\".\n\n\
+         Each ticket is one FILE block under sdlc/epics/{epic}/tickets/<kebab-slug>.md, without a numeric prefix, because ticket numbers are assigned after the proposal. Do not add an `epic` key to the ticket front matter; the path determines the epic.\n\n\
+         Each ticket starts with `# <Title>` without a number, then carries the sections Description, Acceptance criteria, Tests, Gotchas and Dependencies; write dependencies as ticket titles in the body, because ticket numbers do not exist yet."
+    )
+}
+
 /// One conversation turn sent to the upstream model.
 ///
 /// Only the `user` and `assistant` roles exist upstream of the prompt builder;
@@ -48,10 +63,25 @@ pub type Message = ChatMessage;
 /// attachments sorted by path; duplicates are dropped. The history is appended
 /// after the context, in order, with its content untouched; it is consumed by
 /// value, so building long conversations does not clone every turn per request.
-pub fn build(open: &Document, attachments: &[Document], history: Vec<Message>) -> Vec<Message> {
+///
+/// When the ticket generation context of ticket 0049 is given, the system turn
+/// also carries the feature and epic the next tickets are drafted for, plus the
+/// per-ticket rules (one `FILE` block per ticket, no numeric prefix, no `epic`
+/// front matter key, dependencies as ticket titles); the context documents
+/// follow the ticket section.
+pub fn build(
+    open: &Document,
+    attachments: &[Document],
+    history: Vec<Message>,
+    ticket_context: Option<&TicketContext>,
+) -> Vec<Message> {
     let documents = context_documents(open, attachments);
 
     let mut content = SYSTEM_PROMPT.trim_end().to_string();
+    if let Some(context) = ticket_context {
+        content.push_str("\n\n");
+        content.push_str(&ticket_context_section(context));
+    }
     content.push_str("\n\nThe documents in scope for this conversation follow. Each document is introduced by a marker line with its path, followed by its full content:");
     for document in &documents {
         content.push_str(&format!(
@@ -159,7 +189,7 @@ mod tests {
         let conventions = document("sdlc/conventions.md", "# Conventions\n");
         let decision = document("sdlc/decisions/0003-use-axum.md", "# Decision\n");
 
-        let messages = build(&open, &[conventions, decision], Vec::new());
+        let messages = build(&open, &[conventions, decision], Vec::new(), None);
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "system");
@@ -197,7 +227,7 @@ mod tests {
             message("assistant", "Add an ADR for the storage choice."),
         ];
 
-        let messages = build(&open, &[], history);
+        let messages = build(&open, &[], history, None);
 
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].role, "system");
@@ -218,6 +248,7 @@ mod tests {
             &open,
             &[same_as_open, conventions, duplicate_conventions],
             Vec::new(),
+            None,
         );
 
         let content = messages[0].content.clone();
@@ -239,7 +270,7 @@ mod tests {
     fn empty_history_and_blank_turns_are_dropped_and_missing_attachments_are_skipped() {
         let open = document("sdlc/features/export.md", "# Export\n");
 
-        let only_context = build(&open, &[], Vec::new());
+        let only_context = build(&open, &[], Vec::new(), None);
         assert_eq!(only_context.len(), 1);
         assert_eq!(only_context[0].role, "system");
 
@@ -247,6 +278,7 @@ mod tests {
             &open,
             &[],
             vec![message("user", "   \n"), message("assistant", "")],
+            None,
         );
         assert_eq!(blank_history.len(), 1);
 
@@ -254,6 +286,7 @@ mod tests {
             &open,
             &[document("sdlc/conventions.md", "   \n")],
             Vec::new(),
+            None,
         );
         let content = missing_attachment[0].content.clone();
         assert!(content.contains("=== DOC: sdlc/features/export.md ==="));
@@ -266,9 +299,53 @@ mod tests {
             "=== FILE: sdlc/features/export.md ===\nSome prose.\n=== END FILE ===\n\n# Export\n";
         let open = document("sdlc/features/export.md", content);
 
-        let messages = build(&open, &[], Vec::new());
+        let messages = build(&open, &[], Vec::new(), None);
 
         assert!(messages[0].content.contains(content));
+    }
+
+    #[test]
+    fn ticket_context_is_part_of_the_assembled_prompt() {
+        let open = document("sdlc/features/export.md", "# Export\n");
+        let conventions = document("sdlc/conventions.md", "# Conventions\n");
+        let context = TicketContext {
+            feature: Some("export".to_string()),
+            epic: Some("0007-ticket-generation".to_string()),
+        };
+
+        let messages = build(&open, &[conventions], Vec::new(), Some(&context));
+
+        let content = messages[0].content.clone();
+        // The ticket context carries the feature slug and the epic directory.
+        assert!(content.contains("the person drafts tickets for the feature \"export\" in the epic \"0007-ticket-generation\""));
+        assert!(content.contains("sdlc/epics/0007-ticket-generation/tickets/<kebab-slug>.md"));
+        // The no-number rule and the per-ticket shape are part of the context.
+        assert!(content.contains("without a numeric prefix"));
+        assert!(content.contains("# <Title>"));
+        // The context documents follow the ticket section and keep their markers.
+        assert!(content.contains("=== DOC: sdlc/conventions.md ==="));
+        assert!(content.contains("# Conventions\n"));
+        let ticket_at = content
+            .find("The ticket generation context of this conversation")
+            .expect("the ticket context section");
+        let docs_at = content
+            .find("=== DOC: sdlc/conventions.md ===")
+            .expect("the conventions marker");
+        assert!(
+            ticket_at < docs_at,
+            "the ticket context must precede the documents: {content}"
+        );
+    }
+
+    #[test]
+    fn without_a_ticket_context_the_assembled_prompt_has_no_ticket_rules() {
+        let open = document("sdlc/features/export.md", "# Export\n");
+
+        let messages = build(&open, &[], Vec::new(), None);
+
+        let content = messages[0].content.clone();
+        assert!(!content.contains("The ticket generation context of this conversation"));
+        assert!(!content.contains("without a numeric prefix"));
     }
 
     #[test]
@@ -278,7 +355,7 @@ mod tests {
             "=== DELETE: sdlc/features/export.md ===\n",
         );
 
-        let messages = build(&open, &[], Vec::new());
+        let messages = build(&open, &[], Vec::new(), None);
 
         let content = messages[0].content.clone();
         let inert_label = content

@@ -17,7 +17,7 @@ use axum::{
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 
-use crate::chat::{ChatError, Message, Parsed, blocks, build, parse};
+use crate::chat::{ChatError, Message, Parsed, TicketContext, blocks, build, parse};
 use crate::error::ApiError;
 use crate::proposal::{Action, Proposal, ProposalService};
 use crate::state::AppState;
@@ -55,14 +55,23 @@ pub(crate) async fn chat(
     let open = load_document(&state, &turns.open_doc).await?;
     let attachments = load_attachments(&state, &turns.attachments).await;
 
-    let messages = build(&open, &attachments, turns.history);
+    let messages = build(
+        &open,
+        &attachments,
+        turns.history,
+        turns.ticket_context.as_ref(),
+    );
     let source: Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>> =
         match state.chat.send(&messages).await {
             Ok(response) => Box::pin(parse(response.bytes_stream())),
             Err(error) => Box::pin(stream::once(async move { Err::<String, ChatError>(error) })),
         };
 
-    Ok(sse_response(frames(source, state.proposals.clone())))
+    Ok(sse_response(frames(
+        source,
+        state.proposals.clone(),
+        turns.ticket_context.clone(),
+    )))
 }
 
 /// The body of a chat request.
@@ -75,6 +84,10 @@ pub(crate) struct ChatRequest {
     /// The optional attached document paths.
     #[serde(default)]
     pub(crate) attachments: Vec<String>,
+    /// The optional ticket-generation context: the feature slug and the epic
+    /// directory the next tickets are drafted for (ticket 0049).
+    #[serde(default)]
+    pub(crate) ticket_context: Option<TicketContext>,
 }
 
 /// One conversation turn of a chat request.
@@ -94,6 +107,9 @@ struct ValidatedChat {
     open_doc: DocPath,
     /// The attached paths that parsed as documents, missing ones skipped later.
     attachments: Vec<DocPath>,
+    /// The ticket-generation context of ticket 0049, when the turn drafts
+    /// tickets.
+    ticket_context: Option<TicketContext>,
 }
 
 /// Validates the chat request, rejecting every shape the route refuses before
@@ -130,7 +146,49 @@ fn validate_request(request: &ChatRequest) -> Result<ValidatedChat, ApiError> {
         history,
         open_doc,
         attachments,
+        ticket_context: validate_ticket_context(&request.ticket_context)?,
     })
+}
+
+/// Validates the optional ticket-generation context, or `None` when the turn
+/// does not draft tickets.
+///
+/// The feature is a slug without the `.md` suffix and the epic the exact epic
+/// directory name such as `0001-foundation`, so both are checked against the
+/// document layout before they reach the prompt builder and the proposal creation
+/// (ticket 0049). An invalid context is a bad request rather than an ordinary turn,
+/// so it never reaches the model or the proposal layer.
+fn validate_ticket_context(
+    context: &Option<TicketContext>,
+) -> Result<Option<TicketContext>, ApiError> {
+    let Some(context) = context.as_ref() else {
+        return Ok(None);
+    };
+    let feature = context
+        .feature
+        .as_deref()
+        .map(str::trim)
+        .filter(|feature| !feature.is_empty())
+        .map(str::to_string);
+    let epic = context
+        .epic
+        .as_deref()
+        .map(str::trim)
+        .filter(|epic| !epic.is_empty())
+        .map(str::to_string);
+
+    if let Some(feature) = &feature
+        && DocPath::parse(&format!("sdlc/features/{feature}.md")).is_err()
+    {
+        return Err(ApiError::bad_request());
+    }
+    if let Some(epic) = &epic
+        && DocPath::parse(&format!("sdlc/epics/{epic}/description.md")).is_err()
+    {
+        return Err(ApiError::bad_request());
+    }
+
+    Ok(Some(TicketContext { feature, epic }))
 }
 
 /// Loads the open document of the conversation.
@@ -208,6 +266,7 @@ enum RelayState {
 fn frames(
     source: Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>>,
     proposals: Arc<ProposalService>,
+    ticket_context: Option<TicketContext>,
 ) -> impl Stream<Item = Result<String, ChatError>> + Send + 'static {
     stream::unfold(
         RelayState::Streaming {
@@ -216,6 +275,7 @@ fn frames(
         },
         move |state| {
             let value = proposals.clone();
+            let ticket_context = ticket_context.clone();
             async move {
                 let proposals = value;
                 let (frame, next_state) = match state {
@@ -241,7 +301,7 @@ fn frames(
                             // so a partial reply is never parsed.
                             let parsed = blocks::parse(&accumulated);
                             let mut frames: VecDeque<Result<String, ChatError>> =
-                                finalize_reply(&parsed, &proposals)
+                                finalize_reply(&parsed, &proposals, ticket_context)
                                     .await
                                     .into_iter()
                                     .collect();
@@ -287,6 +347,7 @@ fn frames(
 async fn finalize_reply(
     parsed: &Parsed,
     proposals: &ProposalService,
+    ticket_context: Option<TicketContext>,
 ) -> Vec<Result<String, ChatError>> {
     let mut frames = Vec::new();
 
@@ -301,7 +362,10 @@ async fn finalize_reply(
         return frames;
     }
 
-    match proposals.create(&parsed.blocks).await {
+    match proposals
+        .create(&parsed.blocks, ticket_context.as_ref())
+        .await
+    {
         Ok(proposal) => {
             frames.push(Ok(frame_proposal(&proposal, &parsed.warnings)));
             frames.push(Ok(frame_done()));
