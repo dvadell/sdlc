@@ -45,11 +45,23 @@ test("the documentation jobs attach the documents of the ticket", () => {
   assert.deepEqual(byId.get("split-prd").attachments, ["sdlc/PRD.md"]);
   assert.deepEqual(byId.get("feature-spec").attachments, ["sdlc/PRD.md"]);
   assert.deepEqual(byId.get("adr").attachments, ["sdlc/architecture.md", "sdlc/conventions.md"]);
-  assert.deepEqual(byId.get("trim-agents").attachments, ["AGENTS.md", "sdlc/conventions.md"]);
+  assert.deepEqual(
+    byId.get("trim-agents").attachments,
+    ["AGENTS.md", "sdlc/PRD.md", "sdlc/architecture.md", "sdlc/conventions.md"],
+  );
   assert.deepEqual(
     byId.get("check-docs").attachments,
     ["sdlc/PRD.md", "sdlc/architecture.md", "sdlc/conventions.md", "AGENTS.md"],
   );
+});
+
+test("the trim prompt asks for short actionable rules and the full new file", () => {
+  const byId = new Map(PROMPTS.map((prompt) => [prompt.id, prompt]));
+  const trim = byId.get("trim-agents");
+  assert.ok(trim.text.includes("Trim AGENTS.md and keep it consistent with the PRD, architecture and conventions"));
+  assert.ok(/actionable and short/i.test(trim.text));
+  assert.ok(/propose the full new file/i.test(trim.text));
+  assert.ok(trim.text.includes("=== FILE: AGENTS.md ==="));
 });
 
 test("the ticket-generation prompt is disabled until ticket 0049 exists", () => {

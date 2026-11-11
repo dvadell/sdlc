@@ -71,9 +71,7 @@ export const PROMPTS = [
     label: "Trim AGENTS.md",
     title: "Trim AGENTS.md to short actionable rules.",
     text: [
-      "Trim AGENTS.md and propose the complete new content as one FILE block.",
-      "",
-      "Keep the AI rules short, actionable and consistent with the other documents, and propose the full new file, not a patch:",
+      "Trim AGENTS.md and keep it consistent with the PRD, architecture and conventions. Keep the rules actionable and short; propose the full new file, not a patch:",
       "",
       "=== FILE: AGENTS.md ===",
       "The complete new content of the AI rules file.",
@@ -81,7 +79,7 @@ export const PROMPTS = [
       "",
       "Ask clarifying questions instead of guessing. Propose full files, not patches.",
     ].join("\n"),
-    attachments: ["AGENTS.md", "sdlc/conventions.md"],
+    attachments: ["AGENTS.md", "sdlc/PRD.md", "sdlc/architecture.md", "sdlc/conventions.md"],
   },
   {
     id: "check-docs",

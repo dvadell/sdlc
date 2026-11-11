@@ -1020,6 +1020,73 @@ async fn an_invalid_proposed_path_emits_an_error_and_no_proposal_and_writes_noth
 }
 
 #[tokio::test]
+async fn a_reply_proposing_an_unmanaged_rules_file_fails_and_writes_nothing() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"I will add the rules file.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== FILE: CLAUDE.md ===\\n# Rules\\n=== END FILE ===\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "AGENTS.md", b"# Agent rules\n");
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request(
+            user_message("add the rules file"),
+            "AGENTS.md",
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert!(
+        response.body.contains("event: delta"),
+        "the streamed delta should still be relayed: {}",
+        response.body
+    );
+    let error_frame = frame_of(&response.body, "error");
+    assert_eq!(frame_data(error_frame)["code"], json!("invalid_path"));
+    assert_eq!(
+        frame_data(error_frame)["message"],
+        json!("the proposed path is not an allowed document: CLAUDE.md")
+    );
+    assert!(
+        !response.body.contains("event: done"),
+        "an error must not be followed by a done frame: {}",
+        response.body
+    );
+    assert!(
+        !response.body.contains("event: proposal"),
+        "a refused proposal must not be surfaced: {}",
+        response.body
+    );
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join("AGENTS.md")).expect("read the agents"),
+        "# Agent rules\n",
+        "a refused proposal must not write any file"
+    );
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
 async fn a_truncated_upstream_reply_emits_no_proposal() {
     let mock_server = MockServer::start().await;
 

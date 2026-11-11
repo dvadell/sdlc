@@ -9,7 +9,7 @@
 import { state } from "./state.js";
 import { ApiError, acceptProposal, rejectProposal } from "./api.js";
 import { showError } from "./errors.js";
-import { loadDocument, refreshTree, restoreEditor } from "./editor.js";
+import { loadDocument, refreshTree, restoreEditor, proposalPendingNote } from "./editor.js";
 
 // The proposal whose diff is on screen; null when the view is dismissed or the
 // decision settled.
@@ -60,7 +60,7 @@ export function showProposal(proposal) {
   const pending = document.createElement("p");
   pending.id = "proposal-pending";
   pending.className = "proposal-pending";
-  pending.textContent = "A proposal is pending your review.";
+  pending.textContent = proposalPendingNote(viewProposal);
   const warnings = document.createElement("div");
   warnings.className = "proposal-warnings";
   const files = document.createElement("div");

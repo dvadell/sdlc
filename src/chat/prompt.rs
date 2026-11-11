@@ -10,12 +10,15 @@ use crate::store::path::DocPath;
 ///
 /// It states the role (document editor for a software project), the scope
 /// (only the supplied documents), the no-tools and no-commands rule, the
-/// proposal format from architecture section 5 and the "ask instead of
-/// guessing" rule. [`build`] appends the in-scope documents to it, so the
-/// upstream request carries exactly one system message.
+/// rules-file scope (only `AGENTS.md` is managed) and the proposal format from
+/// architecture section 5 and the "ask instead of guessing" rule. [`build`]
+/// appends the in-scope documents to it, so the upstream request carries
+/// exactly one system message.
 pub const SYSTEM_PROMPT: &str = r#"You are a document editor for a software project. You help the person write and refine the Markdown documents that drive their project: the PRD, architecture, conventions, epics, features, decisions and tickets.
 
 You only ever see the documents supplied in this conversation. You have no tools, cannot run commands, and have no access to source code beyond those documents.
+
+The AI rules file of the project is `AGENTS.md`: it is the only rules file this tool manages, and the project does not carry a second one such as `CLAUDE.md`, which sdlc does not manage. Propose changes to `AGENTS.md` only, and never to a rules file sdlc does not manage.
 
 When you propose a change, put it in a reply block using this format:
 
@@ -137,6 +140,17 @@ mod tests {
         assert!(SYSTEM_PROMPT.contains("=== END FILE ==="));
         assert!(SYSTEM_PROMPT.contains("full new content, not a patch"));
         assert!(SYSTEM_PROMPT.contains("Ask the person clarifying questions instead of guessing"));
+    }
+
+    #[test]
+    fn system_prompt_states_the_rules_file_scope() {
+        // `AGENTS.md` is the only AI rules file the tool manages, and a second
+        // rules file such as `CLAUDE.md` is not managed, so a proposal for it is
+        // out of scope rather than merely discouraged.
+        assert!(SYSTEM_PROMPT.contains("AGENTS.md"));
+        assert!(SYSTEM_PROMPT.contains("the only rules file"));
+        assert!(SYSTEM_PROMPT.contains("CLAUDE.md"));
+        assert!(SYSTEM_PROMPT.contains("does not manage"));
     }
 
     #[test]

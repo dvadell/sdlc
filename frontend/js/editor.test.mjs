@@ -108,8 +108,16 @@ after(() => {
   }
 });
 
-const { readStatus, withStatus, save, clearEditor, changeStatus, renderEditor, setRefreshTree } =
-  await import("./editor.js");
+const {
+  readStatus,
+  withStatus,
+  save,
+  clearEditor,
+  changeStatus,
+  renderEditor,
+  setRefreshTree,
+  proposalPendingNote,
+} = await import("./editor.js");
 
 const FEATURE = STATUS_OPTIONS.feature;
 
@@ -263,6 +271,49 @@ test("withStatus preserves mixed CRLF and LF line endings", () => {
     withStatus("---\r\nstatus: planned\n---\n\n# Export\n", "shipped"),
     "---\r\nstatus: shipped\n---\n\n# Export\n",
   );
+});
+
+// The pending-proposal note of the editor area (ticket 0047): an AI proposal for
+// the AI rules file replaces the whole file, so the person is told to review the
+// full-file diff instead of the line patch of the feature proposals.
+
+test("proposalPendingNote asks the person to review the whole file for the AI rules file", () => {
+  state.proposal = { id: "p1", changes: [{ path: "AGENTS.md", action: "modify", diff: "" }] };
+  assert.equal(
+    proposalPendingNote(state.proposal),
+    "AI proposals replace the whole file; review the diff.",
+  );
+});
+
+test("proposalPendingNote keeps the generic pending note for other proposals", () => {
+  state.proposal = { id: "p1", changes: [{ path: "sdlc/features/export.md", action: "modify", diff: "" }] };
+  assert.equal(proposalPendingNote(state.proposal), "A proposal is pending your review.");
+});
+
+test("renderEditor shows the AI rules file pending note while a proposal is pending", () => {
+  state.current.path = "AGENTS.md";
+  state.current.content = "# sdlc\n";
+  state.current.savedContent = "# sdlc\n";
+  state.current.hash = "hash-1";
+  state.dirty = false;
+  state.proposal = { id: "p1", changes: [{ path: "AGENTS.md", action: "modify", diff: "" }] };
+  renderEditor();
+  const pending = editorElement.querySelector("#proposal-pending");
+  assert.ok(pending);
+  assert.equal(pending.textContent, "AI proposals replace the whole file; review the diff.");
+});
+
+test("renderEditor shows the generic pending note while another proposal is pending", () => {
+  state.current.path = "sdlc/features/export.md";
+  state.current.content = "# Export\n";
+  state.current.savedContent = "# Export\n";
+  state.current.hash = "hash-1";
+  state.dirty = false;
+  state.proposal = { id: "p1", changes: [{ path: "sdlc/features/export.md", action: "modify", diff: "" }] };
+  renderEditor();
+  const pending = editorElement.querySelector("#proposal-pending");
+  assert.ok(pending);
+  assert.equal(pending.textContent, "A proposal is pending your review.");
 });
 
 // The status kind mapping against the backend document layout (`src/store/layout.rs`

@@ -222,6 +222,26 @@ test("showProposal renders one section per file with the path and the action and
   );
 });
 
+test("a proposal for the AI rules file explains that it replaces the whole file", () => {
+  state.current.path = "AGENTS.md";
+  state.current.content = "# sdlc\n";
+  state.current.savedContent = "# sdlc\n";
+  state.current.hash = "hash-1";
+  showProposal({
+    id: "p1",
+    changes: [
+      {
+        path: "AGENTS.md",
+        action: "modify",
+        diff: "--- a/AGENTS.md\n+++ b/AGENTS.md\n@@ -1,2 +1,3 @@\n # sdlc\n \n+## Rules\n",
+      },
+    ],
+    warnings: [],
+  });
+
+  assert.equal(editorElement.querySelector("#proposal-pending").textContent, "AI proposals replace the whole file; review the diff.");
+});
+
 test("the diff colors added and removed lines and treats headers and hunks as context", () => {
   showProposal({
     id: "p1",

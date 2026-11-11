@@ -604,6 +604,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_to_an_existing_agents_file_is_a_modify_with_the_base_hash_and_diff() {
+        let (dir, service) = service_in_temp().await;
+        write_file(&dir, "AGENTS.md", "# sdlc\n");
+        let blocks = [write_block(
+            "AGENTS.md",
+            "# sdlc\n\n## Commands\n\n- run the tests\n",
+        )];
+
+        let proposal = service.create(&blocks).await.expect("the proposal");
+
+        let change = &proposal.changes[0];
+        assert_eq!(change.action, Action::Modify);
+        assert_eq!(
+            change.base_hash.as_deref(),
+            Some(content_hash(b"# sdlc\n").as_str())
+        );
+        assert_eq!(
+            change.new_content.as_deref(),
+            Some("# sdlc\n\n## Commands\n\n- run the tests\n")
+        );
+        assert!(change.diff.contains("--- a/AGENTS.md"));
+        assert!(change.diff.contains("+++ b/AGENTS.md"));
+        assert!(change.diff.contains("+## Commands"));
+        assert!(change.diff.contains("+- run the tests"));
+    }
+
+    #[tokio::test]
     async fn delete_requires_an_existing_file() {
         let (_dir, service) = service_in_temp().await;
 
@@ -641,6 +668,24 @@ mod tests {
         ];
 
         let error = service.create(&blocks).await.expect_err("invalid proposal");
+
+        assert!(matches!(error, ProposalError::InvalidPath(_)));
+    }
+
+    #[tokio::test]
+    async fn a_proposal_for_a_rules_file_the_tool_does_not_manage_is_rejected() {
+        // `CLAUDE.md` is not one of the allowed document paths, so the whole
+        // proposal is refused before any change is classified or stored.
+        let (_dir, service) = service_in_temp().await;
+        let blocks = [
+            write_block("AGENTS.md", "# Rules\n"),
+            write_block("CLAUDE.md", "# Rules\n"),
+        ];
+
+        let error = service
+            .create(&blocks)
+            .await
+            .expect_err("the proposal should be rejected");
 
         assert!(matches!(error, ProposalError::InvalidPath(_)));
     }

@@ -552,6 +552,17 @@ export async function changeStatus(status) {
   }
 }
 
+// The pending-proposal note of the editor area: an AI proposal replaces the
+// whole document, so when the proposal carries an AI rules file change the
+// person is told to review the full-file diff before accepting (ticket 0047).
+export function proposalPendingNote(proposal) {
+  const changes = Array.isArray(proposal?.changes) ? proposal.changes : [];
+  const touchesAgents = changes.some((change) => change?.path === "AGENTS.md");
+  return touchesAgents
+    ? "AI proposals replace the whole file; review the diff."
+    : "A proposal is pending your review.";
+}
+
 // Replaces the editor area with the save toolbar and the textarea.
 export function renderEditor() {
   const element = document.querySelector("#editor");
@@ -675,7 +686,7 @@ export function renderEditor() {
     const pending = document.createElement("div");
     pending.id = "proposal-pending";
     pending.className = "proposal-pending";
-    pending.textContent = "A proposal is pending your review.";
+    pending.textContent = proposalPendingNote(state.proposal);
     element.appendChild(pending);
   }
   element.appendChild(toolbar);
