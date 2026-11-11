@@ -341,7 +341,7 @@ impl ProposalService {
         let Some((epic, ticket_name)) = ticket_segments(raw_path) else {
             return Ok(None);
         };
-        if context.epic.is_none() || context.epic.as_deref() != Some(epic) && epic != "<epic>" {
+        if context.epic.is_none() || (context.epic.as_deref() != Some(epic) && epic != "<epic>") {
             // The draft belongs to another epic, so numbering must not rewrite
             // it into the selected one; the path check of ticket 0041 refuses it.
             // Without a chosen epic there is nothing to allocate a number
