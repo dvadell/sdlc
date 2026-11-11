@@ -60,6 +60,10 @@ test("the ticket-generation prompt is disabled until ticket 0049 exists", () => 
   assert.deepEqual(generation.attachments, []);
 });
 
+test("promptById returns null for an unknown id", () => {
+  assert.equal(promptById("nonexistent"), null);
+});
+
 test("the disabled ticket prompt keeps a tooltip explaining the wait", () => {
   assert.ok(DISABLED_PROMPT_HINT.length > 0);
 });

@@ -295,11 +295,17 @@ export function addAttachment(path) {
 // person edits the text and presses Enter or Send when ready (ticket 0046). The
 // click only fills: it never sends, so the prompt stays adjustable.
 export function applyPrompt(prompt) {
-  const input = document.querySelector("#chat-input");
-  if (input) {
-    input.value = prompt.text;
-    input.focus();
+  if (prompt.disabled) {
+    return;
   }
+  const input = document.querySelector("#chat-input");
+  if (!input) {
+    // Without a composer there is nothing to fill; the attachments of a prompt
+    // are only meaningful with the text beside them.
+    return;
+  }
+  input.value = prompt.text;
+  input.focus();
   for (const path of prompt.attachments ?? []) {
     addAttachment(path);
   }
