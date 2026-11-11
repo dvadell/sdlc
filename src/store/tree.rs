@@ -224,12 +224,13 @@ impl DocStore {
         };
         let (status, feature, supersedes, depends_on) = metadata_of(kind, &document.content, &file);
         let (orphaned, feature_orphaned) = if kind == DocKind::Ticket {
-            let epic = epic.clone().unwrap_or_default();
-            let feature_orphaned = feature
-                .as_deref()
-                .is_some_and(|feature| feature_file_missing(&self.root, feature));
+            let epic: &str = epic.as_deref().unwrap_or("");
+            let feature_orphaned = match feature.as_deref() {
+                Some(feature) => feature_file_missing(&self.root, feature).await,
+                None => false,
+            };
             (
-                epic_description_missing(&self.root, &epic).await,
+                epic_description_missing(&self.root, epic).await,
                 feature_orphaned,
             )
         } else {
@@ -418,7 +419,7 @@ async fn epic_description_missing(root: &Path, epic: &str) -> bool {
 
 /// Reports whether the feature file a ticket names no longer resolves, so the
 /// ticket is feature-orphaned without being an orphan by epic (ticket 0048).
-fn feature_file_missing(root: &Path, feature: &str) -> bool {
+async fn feature_file_missing(root: &Path, feature: &str) -> bool {
     let raw = format!("sdlc/features/{feature}.md");
     let Ok(path) = DocPath::parse(&raw) else {
         return true;
@@ -427,7 +428,8 @@ fn feature_file_missing(root: &Path, feature: &str) -> bool {
         return true;
     }
     let file = root.join(path.as_path());
-    !std::fs::metadata(&file)
+    !tokio::fs::metadata(&file)
+        .await
         .map(|metadata| metadata.is_file())
         .unwrap_or(false)
 }
