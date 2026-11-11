@@ -58,8 +58,11 @@ async function runAssistantStream(docPath, assistantEntry, attachments) {
         // proposal, so the person reviews its diff and accepts or rejects it
         // (ticket 0045); the transcript keeps the reply, the editor area shows
         // the diff.
-        state.proposal = event.data ?? null;
-        showProposal(state.proposal);
+        const proposal = event.data ?? null;
+        if (assistantEntry.streamId === streamRequestId && proposal) {
+          state.proposal = proposal;
+          showProposal(proposal);
+        }
       } else if (event.event === "error") {
         failure = event.data ?? null;
       }

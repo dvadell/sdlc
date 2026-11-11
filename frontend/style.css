@@ -899,15 +899,6 @@ body {
 .proposal-partial {
   padding: 0.5rem 0.75rem;
   font-size: 0.9rem;
-}
-
-.proposal-conflict {
-  background: #fdf6e3;
-  border-bottom: 1px solid #ecd9a0;
-  color: #6b5310;
-}
-
-.proposal-partial {
   background: #fdf6e3;
   border-bottom: 1px solid #ecd9a0;
   color: #6b5310;

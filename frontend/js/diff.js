@@ -42,6 +42,15 @@ export function showProposal(proposal) {
   viewPartial = null;
   const element = document.querySelector("#editor");
   if (!element) {
+    // Without an editor area there is nothing to render into; reset the view
+    // state so a later call starts from a clean slate.
+    viewProposal = null;
+    viewConflict = false;
+    viewPartial = null;
+    viewAcceptButton = null;
+    viewRejectButton = null;
+    viewConflictElement = null;
+    viewPartialElement = null;
     return;
   }
 
@@ -127,9 +136,10 @@ function renderProposalFiles(filesElement, changes) {
     const path = document.createElement("span");
     path.className = "proposal-file-path";
     path.textContent = change.path;
+    const actionText = String(change.action ?? "");
     const action = document.createElement("span");
-    action.className = `proposal-file-action proposal-file-action-${change.action}`;
-    action.textContent = change.action;
+    action.className = `proposal-file-action proposal-file-action-${actionText.replace(/[^a-z]/gi, "")}`;
+    action.textContent = actionText;
     header.appendChild(path);
     header.appendChild(action);
     const diff = document.createElement("div");
