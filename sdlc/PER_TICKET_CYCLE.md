@@ -42,5 +42,9 @@
   setup that runs synchronously, so a test that makes `showModal` fail must install
   the failure before the dialog is created (patch the prototype), not on the dialog
   instance afterwards — an instance override installed afterwards never runs.
+- A `stream::unfold` closure handed to the stream machinery is `FnMut`, so it may
+  not move a captured variable into the `async move` block it returns; clone the
+  captured value at the closure-body scope (before the `async move`) and consume the
+  local clone inside, or the borrow checker rejects the move with E0507.
 
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
