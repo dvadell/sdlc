@@ -7,7 +7,7 @@
 //! before accepting, and applies or discards that proposal on accept or reject.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::sync::{Arc, Mutex};
 
 use similar::TextDiff;
@@ -22,6 +22,10 @@ const PRD_PATH: &str = "sdlc/PRD.md";
 
 /// How many context lines the unified diff keeps around each change.
 const DIFF_CONTEXT_LINES: usize = 3;
+
+/// The last valid four-digit ticket number; a proposal that would allocate
+/// above it fails instead of numbering a ticket with five digits (ticket 0050).
+const MAX_TICKET_NUMBER: u32 = 9999;
 
 /// The refusal reasons of a proposal build.
 #[derive(Debug, Error)]
@@ -126,6 +130,9 @@ pub struct Proposal {
     pub id: String,
     /// The changes of the proposal, in the order the model proposed them.
     pub changes: Vec<Change>,
+    /// The warnings of the proposal build, such as a removed `epic` front
+    /// matter key of a ticket create; empty when the build was clean.
+    pub warnings: Vec<String>,
 }
 
 /// Builds and holds the in-memory proposals of one server process.
@@ -168,6 +175,12 @@ impl ProposalService {
     /// that epic's `tickets/` directory; the path, not the front matter, selects
     /// the epic (tickets 0048 and 0049).
     ///
+    /// A ticket-generation create is numbered before the path is parsed (ticket
+    /// 0050): the server allocates the next global ticket number, rewrites the path
+    /// onto it and numbers the H1, so the model never picks a number. Existing
+    /// modifications and deletes are not renumbered, and a proposal without a
+    /// ticket context keeps the plain behaviour of ticket 0041.
+    ///
     /// The proposal is stored in memory and returned; it only becomes real when
     /// a later ticket accepts it.
     pub async fn create(
@@ -177,13 +190,47 @@ impl ProposalService {
     ) -> Result<Proposal, ProposalError> {
         let mut changes: Vec<Change> = Vec::new();
         let mut seen: HashSet<DocPath> = HashSet::new();
+        let mut warnings: Vec<String> = Vec::new();
+        // The next ticket number to hand out for this proposal (ticket 0050): it
+        // is seeded from the store on the first allocation and then runs through
+        // the creates of the proposal, so the allocated numbers come out
+        // sequential while nothing is reserved across proposals.
+        let mut next_ticket: Option<u32> = None;
 
         for block in blocks {
-            let raw_path = block_path(block);
-            let path = DocPath::parse(raw_path)
-                .map_err(|_| ProposalError::InvalidPath(raw_path.to_string()))?;
+            let raw_path = block_path(block).to_string();
+            let content: Option<String> = match block {
+                Block::Write { content, .. } => Some(content.clone()),
+                Block::Delete { .. } => None,
+            };
+
+            // Ticket numbering runs before the path parsing and duplicate
+            // rejection of ticket 0041 (ticket 0050): a ticket-generation create
+            // is numbered first and then validated like any other block.
+            let (raw_path, content) = if let Some(context) = ticket_context
+                && let Some(block_content) = content.as_deref()
+            {
+                match self
+                    .number_ticket_create(
+                        &raw_path,
+                        block_content,
+                        context,
+                        &mut next_ticket,
+                        &mut warnings,
+                    )
+                    .await?
+                {
+                    Some((path, new_content)) => (path, Some(new_content)),
+                    None => (raw_path, content),
+                }
+            } else {
+                (raw_path, content)
+            };
+
+            let path = DocPath::parse(&raw_path)
+                .map_err(|_| ProposalError::InvalidPath(raw_path.clone()))?;
             if !seen.insert(path.clone()) {
-                return Err(ProposalError::DuplicatePath(raw_path.to_string()));
+                return Err(ProposalError::DuplicatePath(raw_path.clone()));
             }
 
             if let Some(context) = ticket_context {
@@ -194,36 +241,39 @@ impl ProposalService {
                     && let Some(selected) = context.epic.as_deref()
                     && crate::store::layout::epic_of(path.as_path()) != Some(selected)
                 {
-                    return Err(ProposalError::InvalidPath(raw_path.to_string()));
+                    return Err(ProposalError::InvalidPath(raw_path.clone()));
                 }
             }
 
-            let (action, new_content, base_hash, base_content) = match block {
-                Block::Write { content, .. } => {
+            let (action, new_content, base_hash, base_content) = match content.as_deref() {
+                Some(content) => {
                     let document = self.store.read(&path).await;
                     match document {
                         Ok(document) => (
                             Action::Modify,
-                            Some(content.clone()),
+                            Some(content.to_string()),
                             Some(document.hash),
                             document.content,
                         ),
                         // A missing file is a create; the base hash of a create is
                         // `None` because there is no content the proposal replaced.
-                        Err(StoreError::NotFound(_)) => {
-                            (Action::Create, Some(content.clone()), None, String::new())
-                        }
+                        Err(StoreError::NotFound(_)) => (
+                            Action::Create,
+                            Some(content.to_string()),
+                            None,
+                            String::new(),
+                        ),
                         Err(error) => return Err(error.into()),
                     }
                 }
-                Block::Delete { .. } => {
+                None => {
                     let document = self.store.read(&path).await;
                     match document {
                         Ok(document) => {
                             (Action::Delete, None, Some(document.hash), document.content)
                         }
                         Err(StoreError::NotFound(_)) => {
-                            return Err(ProposalError::MissingTarget(raw_path.to_string()));
+                            return Err(ProposalError::MissingTarget(raw_path.clone()));
                         }
                         Err(error) => return Err(error.into()),
                     }
@@ -254,6 +304,7 @@ impl ProposalService {
         let proposal = Proposal {
             id: Uuid::new_v4().to_string(),
             changes,
+            warnings,
         };
         self.proposals
             .lock()
@@ -261,6 +312,95 @@ impl ProposalService {
             .insert(proposal.id.clone(), proposal.clone());
 
         Ok(proposal)
+    }
+
+    /// Numbers one proposed ticket create of a ticket-generation turn (ticket
+    /// 0050).
+    ///
+    /// The ticket context of ticket 0049 turns every proposed ticket into a
+    /// draft of the feature the person chose, so the server owns the ticket
+    /// number: a create whose raw path sits under the selected epic's
+    /// `tickets/` directory (or uses the prompt's `sdlc/epics/<epic>/tickets/`
+    /// placeholder) is rewritten onto the next free number, with the content
+    /// numbered and its front matter cleaned up. Modifications and deletes are
+    /// left alone, and blocks that are not ticket creates of the selected epic
+    /// pass through untouched, so the path validation of ticket 0041 still
+    /// rejects the rest of the proposal.
+    ///
+    /// The number is handed out from `next_number`, which the caller seeds from
+    /// the store and keeps advancing, so the creates of one proposal come out
+    /// sequential while nothing is reserved across proposals.
+    ///
+    /// Returns the rewritten path and content, or `None` when the block is not
+    /// such a create and keeps the raw path and content.
+    async fn number_ticket_create(
+        &self,
+        raw_path: &str,
+        content: &str,
+        context: &TicketContext,
+        next_number: &mut Option<u32>,
+        warnings: &mut Vec<String>,
+    ) -> Result<Option<(String, String)>, ProposalError> {
+        let Some((epic, ticket_name)) = ticket_segments(raw_path) else {
+            return Ok(None);
+        };
+        if context.epic.as_deref() != Some(epic) && epic != "<epic>" {
+            // The draft belongs to another epic, so numbering must not rewrite
+            // it into the selected one; the path check of ticket 0041 refuses it.
+            return Ok(None);
+        }
+
+        let allocate = match crate::store::layout::numbered_number(ticket_name) {
+            // A numbered path that still exists is a modification of an existing
+            // ticket, which ticket 0050 never renumbers; a numbered create is
+            // rewritten onto the next free number, so the allocation runs while
+            // the numbered file is still missing.
+            Some(number) if number != 0 => {
+                let path = DocPath::parse(raw_path)
+                    .map_err(|_| ProposalError::InvalidPath(raw_path.to_string()))?;
+                matches!(self.store.read(&path).await, Err(StoreError::NotFound(_)))
+            }
+            _ => true,
+        };
+        if !allocate {
+            return Ok(None);
+        }
+
+        let number = match *next_number {
+            Some(number) => number,
+            None => {
+                let number = self
+                    .store
+                    .next_ticket_number()
+                    .await
+                    .map_err(ProposalError::from)?;
+                *next_number = Some(number);
+                number
+            }
+        };
+        if number > MAX_TICKET_NUMBER {
+            return Err(ProposalError::Store(StoreError::NumberExhausted {
+                next: number,
+            }));
+        }
+        *next_number = Some(number + 1);
+
+        let title = ticket_title(content, ticket_name).map_err(ProposalError::from)?;
+        let slug = crate::store::templates::slugify(&title).map_err(ProposalError::from)?;
+        let new_path = format!(
+            "sdlc/epics/{}/tickets/{number:04}-{slug}.md",
+            context.epic.as_deref().unwrap_or(epic)
+        );
+
+        let (new_content, removed_epic) =
+            rewrite_ticket(content, number, &title, context.feature.as_deref());
+        if removed_epic {
+            warnings.push(format!(
+                "removed the `epic` front matter key of {new_path}; the ticket path determines the epic"
+            ));
+        }
+
+        Ok(Some((new_path, new_content)))
     }
 
     /// Returns the stored proposal, or `None` when the id is unknown.
@@ -511,6 +651,179 @@ fn unified_diff(path: &DocPath, base: &str, new: &str) -> String {
         &format!("b/{}", path.as_path().display()),
     );
     diff.to_string()
+}
+
+/// The epic directory and ticket file name of a ticket path such as
+/// `sdlc/epics/0001-foundation/tickets/0001-add-export.md`, or `None` when the
+/// path is not shaped like a ticket at all.
+///
+/// The shape is the one of the document layout: `sdlc/epics/<epic>/tickets/<name>`,
+/// with the ticket file name flat inside the tickets directory.
+fn ticket_segments(raw_path: &str) -> Option<(&str, &str)> {
+    let mut segments: Vec<&str> = Vec::new();
+    for component in Path::new(raw_path).components() {
+        if let Component::Normal(segment) = component
+            && let Some(segment) = segment.to_str()
+        {
+            segments.push(segment);
+        }
+    }
+    if segments.len() != 5
+        || segments[0] != "sdlc"
+        || segments[1] != "epics"
+        || segments[3] != "tickets"
+    {
+        return None;
+    }
+
+    Some((segments[2], segments[4]))
+}
+
+/// The title of one proposed ticket: the text of its first heading without the
+/// ticket number, or the file name of the draft when the content carries no
+/// heading to number.
+fn ticket_title(content: &str, ticket_name: &str) -> Result<String, StoreError> {
+    let (_front_matter, body) = crate::store::frontmatter::split(content);
+    if let Some((_index, text)) = first_heading(body) {
+        let title = strip_ticket_number(&text).trim().to_string();
+        if !title.is_empty() {
+            return Ok(title);
+        }
+    }
+
+    // A draft without a usable heading still names its ticket, so the file name
+    // carries the slug the model proposed.
+    let stem = ticket_name.strip_suffix(".md").unwrap_or(ticket_name);
+
+    Ok(stem.trim().replace('-', " "))
+}
+
+/// The first ATX heading of a document body: the index of its line and its text
+/// without the leading hashes, or `None` when the body opens with no heading.
+///
+/// The first heading wins whatever level it carries, so a draft that opens with a
+/// deeper heading still gets its H1 normalized onto the allocated number.
+fn first_heading(body: &str) -> Option<(usize, String)> {
+    for (index, line) in body.split('\n').enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        let level = trimmed.len() - trimmed.trim_start_matches('#').len();
+        let text = &trimmed[level..];
+        if !text.is_empty() && !text.starts_with(' ') {
+            // A `#Title` without the ATX space is not a heading.
+            continue;
+        }
+        return Some((index, text.trim().to_string()));
+    }
+
+    None
+}
+
+/// Strips a leading ticket number from heading or file name text, such as the
+/// `0007:` of `# 0007: Add export` or the `0001-` of `0001-add-export`, leaving
+/// the human title or slug behind.
+fn strip_ticket_number(text: &str) -> &str {
+    let text = text.trim();
+    let (number, rest) = if let Some((number, rest)) = text.split_once(':') {
+        (number.trim(), Some(rest))
+    } else if let Some((number, rest)) = text.split_once('-') {
+        (number, Some(rest))
+    } else {
+        (text, None)
+    };
+    let is_number =
+        !number.is_empty() && number.len() <= 4 && number.bytes().all(|byte| byte.is_ascii_digit());
+    if is_number {
+        return rest.map(str::trim).unwrap_or("");
+    }
+
+    text
+}
+
+/// The rewritten content of one numbered ticket create, with its front matter
+/// cleaned up (ticket 0050).
+///
+/// The first heading of the body becomes `# <number>: <title>`, any `epic` front
+/// matter key the model added is dropped and the optional feature binding is set
+/// to the selected feature; unknown keys and the rest of the document survive.
+fn rewrite_ticket(
+    content: &str,
+    number: u32,
+    title: &str,
+    feature: Option<&str>,
+) -> (String, bool) {
+    let (front_matter, body) = crate::store::frontmatter::split(content);
+
+    let new_body = match first_heading(body) {
+        Some((index, _text)) => {
+            let heading = format!("# {number:04}: {title}");
+            let mut lines: Vec<&str> = body.split('\n').collect();
+            lines[index] = heading.as_str();
+            lines.join("\n")
+        }
+        None => body.to_string(),
+    };
+
+    let mut front_matter_text = None;
+    let mut removed_epic = false;
+    if let Some(front_matter) = front_matter {
+        let mut lines: Vec<String> = front_matter
+            .split('\n')
+            .map(|line| line.trim_end_matches('\r').to_string())
+            .collect();
+        if lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        let before = lines.len();
+        lines.retain(|line| front_key(line) != Some("epic"));
+        if lines.len() < before {
+            removed_epic = true;
+        }
+        if let Some(feature) = feature {
+            // The ticket context owns the feature binding, so an existing value
+            // is replaced when it disagrees with the selected feature and the key
+            // is added when the draft did not carry one.
+            let mut replaced = false;
+            let mut rewritten: Vec<String> = Vec::with_capacity(lines.len());
+            for line in lines.drain(..) {
+                if front_key(&line) == Some("feature") {
+                    rewritten.push(format!("feature: {feature}"));
+                    replaced = true;
+                } else {
+                    rewritten.push(line);
+                }
+            }
+            if !replaced {
+                rewritten.push(format!("feature: {feature}"));
+            }
+            lines = rewritten;
+        }
+        // The front matter is re-emitted without its trailing newline, so the
+        // joining below renders the block delimiter right.
+        front_matter_text = Some(lines.join("\n"));
+    } else if let Some(feature) = feature {
+        front_matter_text = Some(format!("feature: {feature}"));
+    }
+
+    let body = if let Some(stripped) = new_body.strip_prefix('\n') {
+        stripped.to_string()
+    } else {
+        new_body.clone()
+    };
+    let new_content = match front_matter_text {
+        Some(front_matter) => format!("---\n{front_matter}\n---\n\n{body}"),
+        None => body,
+    };
+
+    (new_content, removed_epic)
+}
+
+/// The key of one front matter line, without its value.
+fn front_key(line: &str) -> Option<&str> {
+    let line = line.trim();
+    line.split_once(':').map(|(key, _)| key.trim())
 }
 
 #[cfg(test)]
@@ -1171,6 +1484,422 @@ mod tests {
             .expect_err("the proposal");
 
         assert!(matches!(error, ProposalError::InvalidPath(_)));
+    }
+
+    // ------------------------------------------------------------------
+    // Ticket 0050: server-side ticket numbering
+
+    fn ticket_context(epic: &str, feature: Option<&str>) -> TicketContext {
+        TicketContext {
+            feature: feature.map(|feature| feature.to_string()),
+            epic: Some(epic.to_string()),
+        }
+    }
+
+    fn change_path(change: &Change) -> String {
+        change.path.as_path().to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn two_unnumbered_ticket_creates_are_numbered_in_the_chosen_epic() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [
+            write_block(
+                "sdlc/epics/0001-foundation/tickets/add-export.md",
+                "# Add Export\n",
+            ),
+            write_block(
+                "sdlc/epics/0001-foundation/tickets/add-import.md",
+                "# Add Import\n",
+            ),
+        ];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(proposal.changes.len(), 2);
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+        assert_eq!(
+            change_path(&proposal.changes[1]),
+            "sdlc/epics/0001-foundation/tickets/0002-add-import.md"
+        );
+        assert_eq!(proposal.changes[0].action, Action::Create);
+        assert_eq!(proposal.changes[1].action, Action::Create);
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0001: Add Export\n")
+        );
+        assert_eq!(
+            proposal.changes[1].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0002: Add Import\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn three_unnumbered_ticket_creates_number_themselves_sequentially() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [
+            write_block(
+                "sdlc/epics/0001-foundation/tickets/add-export.md",
+                "# Add Export\n",
+            ),
+            write_block(
+                "sdlc/epics/0001-foundation/tickets/add-import.md",
+                "# Add Import\n",
+            ),
+            write_block(
+                "sdlc/epics/0001-foundation/tickets/add-audit.md",
+                "# Add Audit\n",
+            ),
+        ];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(proposal.changes.len(), 3);
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+        assert_eq!(
+            change_path(&proposal.changes[1]),
+            "sdlc/epics/0001-foundation/tickets/0002-add-import.md"
+        );
+        assert_eq!(
+            change_path(&proposal.changes[2]),
+            "sdlc/epics/0001-foundation/tickets/0003-add-audit.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0001: Add Export\n")
+        );
+        assert_eq!(
+            proposal.changes[1].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0002: Add Import\n")
+        );
+        assert_eq!(
+            proposal.changes[2].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0003: Add Audit\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_supplied_ticket_number_is_replaced_by_the_next_free_number() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/0007-add-export.md",
+            "# 0007: Add Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0001: Add Export\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_create_without_a_usable_heading_numbers_from_the_file_name() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "Some description of the export.\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\nSome description of the export.\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deeper_heading_is_normalized_onto_the_allocated_h1() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "## Add Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0001: Add Export\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_model_slug_is_slugified_into_the_ticket_file_name() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "# Add CSV Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0001-add-csv-export.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\n# 0001: Add CSV Export\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_ticket_title_is_rejected() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "# !!!\n",
+        )];
+
+        let error = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect_err("the proposal");
+
+        assert!(matches!(
+            error,
+            ProposalError::Store(StoreError::InvalidTitle(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_removed_epic_key_is_reported_and_the_feature_is_bound() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "---\nepic: 0002-platform\nstatus: todo\n---\n\n# Add Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(proposal.warnings.len(), 1);
+        assert!(proposal.warnings[0].contains("epic"));
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nstatus: todo\nfeature: export\n---\n\n# 0001: Add Export\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wrong_feature_is_replaced_by_the_selected_one() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "---\nstatus: todo\nfeature: wrong\n---\n\n# Add Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nstatus: todo\nfeature: export\n---\n\n# 0001: Add Export\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_front_matter_keys_survive_a_numbered_create() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "---\nstatus: todo\ndepends_on: [\"0004\"]\nepic: 0002-platform\n---\n\n# Add Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        let content = proposal.changes[0]
+            .new_content
+            .as_deref()
+            .expect("the content");
+        assert!(content.contains("depends_on: [\"0004\"]"));
+        assert!(content.contains("status: todo"));
+        assert!(!content.contains("epic:"));
+    }
+
+    #[tokio::test]
+    async fn the_numbered_proposal_can_be_accepted_and_written_to_disk() {
+        let (dir, _store, service) = service_in_temp_with_store().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("create the epic tickets directory");
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "# Add Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+        let report = service.accept(&proposal.id).await.expect("the accept");
+
+        assert_eq!(
+            report.applied,
+            vec!["sdlc/epics/0001-foundation/tickets/0001-add-export.md".to_string()]
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                dir.path()
+                    .join("sdlc/epics/0001-foundation/tickets/0001-add-export.md")
+            )
+            .expect("read the ticket"),
+            "---\nfeature: export\n---\n\n# 0001: Add Export\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_create_past_the_four_digit_boundary_fails_cleanly() {
+        let (dir, _store, service) = service_in_temp_with_store().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/epics/0001-foundation/tickets"))
+            .expect("create the epic tickets directory");
+        std::fs::write(
+            dir.path()
+                .join("sdlc/epics/0001-foundation/tickets/9999-late.md"),
+            "# 9999: Late\n",
+        )
+        .expect("write the ticket");
+
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "# Add Export\n",
+        )];
+
+        let error = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect_err("the proposal");
+
+        assert!(matches!(
+            error,
+            ProposalError::Store(StoreError::NumberExhausted { next: 10000 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_existing_ticket_modify_is_not_renumbered() {
+        let (dir, _store, service) = service_in_temp_with_store().await;
+        write_file(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0003-add-export.md",
+            "# 0003: Add Export\n",
+        );
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/0003-add-export.md",
+            "# 0003: Add Export\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(proposal.changes.len(), 1);
+        assert_eq!(proposal.changes[0].action, Action::Modify);
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0003-add-export.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("# 0003: Add Export\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_ticket_context_the_plain_proposal_behaviour_is_kept() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+
+        let error = service
+            .create(
+                &[write_block(
+                    "sdlc/epics/0001-foundation/tickets/add-export.md",
+                    "# Add Export\n",
+                )],
+                None,
+            )
+            .await
+            .expect_err("the proposal");
+
+        assert!(matches!(error, ProposalError::InvalidPath(_)));
+
+        let proposal = service
+            .create(
+                &[write_block(
+                    "sdlc/epics/0001-foundation/tickets/0007-add-export.md",
+                    "# 0007: Add Export\n",
+                )],
+                None,
+            )
+            .await
+            .expect("the proposal");
+
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0007-add-export.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("# 0007: Add Export\n")
+        );
     }
 
     #[tokio::test]

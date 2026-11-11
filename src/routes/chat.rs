@@ -373,7 +373,11 @@ async fn finalize_reply(
 
     match proposals.create(&parsed.blocks, ticket_context).await {
         Ok(proposal) => {
-            frames.push(Ok(frame_proposal(&proposal, &parsed.warnings)));
+            // The proposal warnings carry the ticket numbering of ticket 0050,
+            // on top of the warnings of the skipped blocks of the reply.
+            let mut warnings = parsed.warnings.clone();
+            warnings.extend(proposal.warnings.iter().cloned());
+            frames.push(Ok(frame_proposal(&proposal, &warnings)));
             frames.push(Ok(frame_done()));
         }
         Err(error) => frames.push(Ok(frame_error(&ChatError::from(error)))),
@@ -541,6 +545,7 @@ mod tests {
         let proposal = Proposal {
             id: "0d1b2f3a-4b5c-6d7e-8f90-1a2b3c4d5e6f".to_string(),
             changes: vec![change],
+            warnings: Vec::new(),
         };
 
         let frame = frame_proposal(&proposal, &["the block was skipped".to_string()]);
