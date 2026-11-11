@@ -447,6 +447,19 @@ body {
   font-size: 0.85rem;
 }
 
+/* The built-in prompt shortcuts of the chat panel (ticket 0046): a small row of
+   buttons that wraps on narrow panels, each one with a short title. */
+.chat-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.chat-prompt {
+  font-size: 0.8rem;
+}
+
 /* The dirty indicator of the selected document, shown as `• filename` in the
    header while the document has unsaved changes. */
 #header .doc-dirty {

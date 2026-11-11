@@ -5,6 +5,7 @@ import { state } from "./state.js";
 import { ApiError } from "./api.js";
 import { readSse } from "./sse.js";
 import { showProposal } from "./diff.js";
+import { PROMPTS, DISABLED_PROMPT_HINT } from "./prompts.js";
 
 // The abort controller of the reply in flight; null when the panel is idle.
 let abortController = null;
@@ -290,6 +291,20 @@ export function addAttachment(path) {
   attachments.push(path);
 }
 
+// Fills the composer with one built-in prompt and attaches its documents; the
+// person edits the text and presses Enter or Send when ready (ticket 0046). The
+// click only fills: it never sends, so the prompt stays adjustable.
+export function applyPrompt(prompt) {
+  const input = document.querySelector("#chat-input");
+  if (input) {
+    input.value = prompt.text;
+    input.focus();
+  }
+  for (const path of prompt.attachments ?? []) {
+    addAttachment(path);
+  }
+}
+
 // Detaches a document: it leaves the conversation context and stops being part
 // of the next chat request (ticket 0039).
 export function removeAttachment(path) {
@@ -393,8 +408,33 @@ export function renderChat() {
   const attachButton = element.querySelector("#chat-attach");
   bindAttachButton(attachButton);
 
+  const prompts = element.querySelector("#chat-prompts");
+  renderPrompts(prompts);
+
   renderAttachments();
   renderNotice();
+}
+
+// The built-in prompt shortcuts of the panel (ticket 0046): one button per
+// prompt, each filling the composer with the prompt text and attaching the
+// prompt's documents when clicked; nothing is sent before the person presses
+// Enter or Send.
+function renderPrompts(container) {
+  if (!container) {
+    return;
+  }
+  container.replaceChildren();
+  for (const prompt of PROMPTS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chat-button chat-prompt";
+    button.id = `chat-prompt-${prompt.id}`;
+    button.textContent = prompt.label;
+    button.disabled = Boolean(prompt.disabled);
+    button.title = prompt.disabled ? DISABLED_PROMPT_HINT : prompt.title;
+    button.addEventListener("click", () => applyPrompt(prompt));
+    container.appendChild(button);
+  }
 }
 
 // Binds the composer once per element instance; the flags track the element

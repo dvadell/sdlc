@@ -387,7 +387,8 @@ Files:
 | `js/sidebar.js` | Document tree and create/rename/delete actions |
 | `js/editor.js` | Textarea, save, preview toggle |
 | `js/diff.js` | Rendering a proposal |
-| `js/chat.js` | Chat panel, built-in prompts, attachments |
+| `js/chat.js` | Chat panel, composer, attachments and prompt wiring |
+| `js/prompts.js` | The built-in prompt shortcuts and their prompt texts |
 | `vendor/marked.min.js`, `vendor/purify.min.js` | Pinned third-party files; note the version in a comment at the top of each file or in `vendor/README.md` |
 
 ### Reading the chat stream

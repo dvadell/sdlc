@@ -5,6 +5,7 @@
 import { after, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { state } from "./state.js";
+import { PROMPTS, promptById, enabledPrompts, DISABLED_PROMPT_HINT } from "./prompts.js";
 
 // The chat module wires browser globals while it loads; give Node the minimal
 // surface it needs before importing it, and restore the previous values when the
@@ -113,6 +114,8 @@ attachPanelElement.id = "chat-attach-panel";
 attachPanelElement.hidden = true;
 const attachListElement = new FakeElement("ul");
 attachListElement.id = "chat-attach-list";
+const promptsElement = new FakeElement("div");
+promptsElement.id = "chat-prompts";
 
 chatElement.appendChild(messagesElement);
 chatElement.appendChild(unconfiguredElement);
@@ -130,6 +133,7 @@ chatElement.appendChild(chipsElement);
 chatElement.appendChild(attachButtonElement);
 chatElement.appendChild(attachPanelElement);
 chatElement.appendChild(attachListElement);
+chatElement.appendChild(promptsElement);
 
 globalThis.document = globalThis.document ?? {
   documentElement: { dataset: {} },
@@ -163,6 +167,8 @@ globalThis.document = globalThis.document ?? {
         return attachPanelElement;
       case "#chat-attach-list":
         return attachListElement;
+      case "#chat-prompts":
+        return promptsElement;
       default:
         return null;
     }
@@ -550,4 +556,61 @@ test("the auto-scroll only runs while the person is already at the bottom", asyn
   const second = sendChat();
   await second;
   assert.equal(messagesElement.scrollTop, 1000);
+});
+
+test("the built-in prompt row renders one button per prompt with a title and disables the ticket prompt", () => {
+  renderChat();
+
+  const prompts = document.querySelector("#chat-prompts");
+  assert.ok(prompts);
+  assert.equal(prompts.children.length, PROMPTS.length);
+  const generation = prompts.children.find((child) => child.id === "chat-prompt-generate-tickets");
+  assert.ok(generation);
+  assert.equal(generation.disabled, true);
+  assert.ok(String(generation.title).length > 0);
+  const split = prompts.children.find((child) => child.id === "chat-prompt-split-prd");
+  assert.ok(split);
+  assert.equal(split.disabled, false);
+  assert.ok(String(split.title).length > 0);
+});
+
+test("clicking a built-in prompt fills the composer and attaches its documents without sending", () => {
+  state.chat.attachments = [];
+  renderChat();
+
+  const prompts = document.querySelector("#chat-prompts");
+  assert.ok(prompts);
+  const adr = prompts.children.find((child) => child.id === "chat-prompt-adr");
+  assert.ok(adr);
+  adr.fire("click", {});
+
+  assert.equal(inputElement.value, promptById("adr").text);
+  // The open document (the PRD) is the context on its own and is not re-attached;
+  // the prompt adds the architecture and the conventions.
+  assert.deepEqual(state.chat.attachments, ["sdlc/architecture.md", "sdlc/conventions.md"]);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("clicking a built-in prompt twice does not duplicate the attachments", () => {
+  renderChat();
+
+  const prompts = document.querySelector("#chat-prompts");
+  const check = prompts.children.find((child) => child.id === "chat-prompt-check-docs");
+  assert.ok(check);
+  check.fire("click", {});
+  check.fire("click", {});
+
+  // The open document is skipped as attachment and the rest are added once.
+  assert.deepEqual(state.chat.attachments, [
+    "sdlc/architecture.md",
+    "sdlc/conventions.md",
+    "AGENTS.md",
+  ]);
+});
+
+test("the enabled built-in prompts are the five that are ready to use", () => {
+  assert.equal(PROMPTS.length, 6);
+  assert.equal(enabledPrompts().length, 5);
+  assert.equal(promptById("generate-tickets")?.disabled, true);
+  assert.ok(DISABLED_PROMPT_HINT.length > 0);
 });
