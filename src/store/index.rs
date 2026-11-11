@@ -306,6 +306,9 @@ mod tests {
             status: status.map(|status| status.to_string()),
             epic: None,
             feature: None,
+            depends_on: Vec::new(),
+            orphaned: false,
+            feature_orphaned: false,
             supersedes: None,
         }
     }

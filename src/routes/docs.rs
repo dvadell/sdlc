@@ -41,6 +41,16 @@ struct DocEntryResponse {
     epic: Option<String>,
     /// The optional feature binding of a ticket.
     feature: Option<String>,
+    /// The ticket dependencies of a ticket, as ticket numbers; empty for kinds
+    /// that carry no dependency list.
+    depends_on: Vec<u32>,
+    /// Whether the ticket's epic directory has no description, so a ticket
+    /// under such a manually broken directory is orphaned but still listed
+    /// (ticket 0048).
+    orphaned: bool,
+    /// Whether the ticket named a feature that no longer resolves; it does not
+    /// affect the epic grouping (ticket 0048).
+    feature_orphaned: bool,
 }
 
 /// A document's content and current content hash.
@@ -179,6 +189,9 @@ impl From<DocEntry> for DocEntryResponse {
             supersedes: entry.supersedes,
             epic: entry.epic,
             feature: entry.feature,
+            depends_on: entry.depends_on,
+            orphaned: entry.orphaned,
+            feature_orphaned: entry.feature_orphaned,
         }
     }
 }

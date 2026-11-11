@@ -415,6 +415,51 @@ pub fn parse_decision(content: &str, file: &str) -> DocMeta<DecisionStatus> {
     }
 }
 
+/// The typed ticket metadata: the ticket-specific front matter fields with
+/// dependencies as ticket numbers (ticket 0048).
+///
+/// The conversion takes the generic front matter of a document and keeps the
+/// ticket fields only; the epic of a ticket comes from its path, never from the
+/// metadata, so there is deliberately no epic field here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TicketMeta {
+    /// The optional feature slug the ticket belongs to, without the `.md`
+    /// suffix; `None` when the ticket carries no binding.
+    pub feature: Option<String>,
+    /// The optional ticket status, when the front matter carries a valid one.
+    pub status: Option<TicketStatus>,
+    /// The ticket numbers this ticket depends on; entries that are not valid
+    /// ticket numbers are ignored with a warning instead of becoming ids.
+    pub depends_on: Vec<u32>,
+}
+
+impl TicketMeta {
+    /// The typed ticket metadata of a ticket from its generic front matter
+    /// (ticket 0048).
+    ///
+    /// Malformed dependency entries are ignored with a warning, and a missing
+    /// or invalid status simply yields `None`, like every other kind.
+    pub fn from_meta(meta: DocMeta<TicketStatus>) -> Self {
+        let mut depends_on = Vec::with_capacity(meta.depends_on.len());
+        for id in &meta.depends_on {
+            match id.parse::<u32>() {
+                Ok(number) => depends_on.push(number),
+                Err(_) => {
+                    tracing::warn!(dependency = %id, "ignoring a malformed ticket dependency")
+                }
+            }
+        }
+
+        Self {
+            feature: meta
+                .feature
+                .map(|feature| feature.strip_suffix(".md").unwrap_or(&feature).to_string()),
+            status: meta.status,
+            depends_on,
+        }
+    }
+}
+
 /// Parses the front matter of a ticket.
 ///
 /// Missing, malformed or invalid blocks yield [`DocMeta::empty`] plus a
@@ -547,6 +592,30 @@ mod tests {
         assert_eq!(meta.status, Some(TicketStatus::InProgress));
         assert_eq!(meta.feature.as_deref(), Some("export"));
         assert_eq!(meta.depends_on, vec!["0004", "0005"]);
+    }
+
+    #[test]
+    fn ticket_meta_keeps_the_typed_ticket_fields_from_the_generic_front_matter() {
+        let meta = TicketMeta::from_meta(parse_ticket(
+            "---\nstatus: in-progress\nfeature: export.md\ndepends_on: [\"0004\", \"0005\"]\n---\n",
+            "sdlc/epics/0001-foundation/tickets/0004-add-export.md",
+        ));
+
+        assert_eq!(meta.feature.as_deref(), Some("export"));
+        assert_eq!(meta.status, Some(TicketStatus::InProgress));
+        assert_eq!(meta.depends_on, vec![4, 5]);
+    }
+
+    #[test]
+    fn ticket_meta_ignores_malformed_dependency_entries_with_a_warning() {
+        let meta = TicketMeta::from_meta(parse_ticket(
+            "---\nstatus: todo\ndepends_on: [\"0004\", \"not-a-ticket\", \"12\"]\n---\n",
+            "sdlc/epics/0001-foundation/tickets/0004-add-export.md",
+        ));
+
+        // Malformed entries are dropped, valid ids become numbers.
+        assert_eq!(meta.depends_on, vec![4, 12]);
+        assert_eq!(meta.status, Some(TicketStatus::Todo));
     }
 
     #[test]

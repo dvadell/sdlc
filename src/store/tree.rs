@@ -1,11 +1,14 @@
-//! The document tree listing (ticket 0013).
+//! The document tree listing (ticket 0013, ticket metadata in ticket 0048).
 //!
 //! The tree answers the sidebar's first question in one read: which documents
 //! exist, in what order, with which kind, title, status, epic and feature
 //! binding. It walks the same allowed layout as every other store entry point,
 //! so a path that is not a document never gets a tree entry, and one unreadable
-//! file never fails the whole listing.
+//! file never fails the whole listing. Tickets are grouped under the epic
+//! directory that contains them, which the path states and the front matter
+//! never repeats.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::store::frontmatter;
@@ -30,6 +33,17 @@ pub struct DocEntry {
     pub epic: Option<String>,
     /// The optional feature slug a ticket belongs to; `None` when absent.
     pub feature: Option<String>,
+    /// The ticket dependencies of a ticket, as ticket numbers; empty for kinds
+    /// that carry no dependency list.
+    pub depends_on: Vec<u32>,
+    /// Whether the ticket's epic directory has no `description.md`; a ticket
+    /// under such a manually broken directory is orphaned but still listed
+    /// (ticket 0048). False for kinds that carry no epic.
+    pub orphaned: bool,
+    /// Whether the ticket named a feature that no longer resolves; it does not
+    /// affect the epic grouping (ticket 0048). False for kinds without a
+    /// feature binding.
+    pub feature_orphaned: bool,
     /// The decision this decision supersedes, as a decision number; `None`
     /// for kinds that carry no supersedes pointer.
     pub supersedes: Option<u32>,
@@ -115,6 +129,7 @@ impl DocStore {
                 .join(&name)
                 .join("tickets");
             let mut tickets: Vec<(u32, DocEntry)> = Vec::new();
+            let mut ticket_numbers: HashSet<u32> = HashSet::new();
             if let Ok(mut dir) = tokio::fs::read_dir(&tickets_dir).await {
                 while let Some(ticket) = dir.next_entry().await.ok().flatten() {
                     let ticket_name = ticket.file_name().to_string_lossy().into_owned();
@@ -123,7 +138,15 @@ impl DocStore {
                         .read_at(&raw, DocKind::Ticket, Some(name.clone()))
                         .await
                     {
-                        tickets.push((numbered_prefix(&ticket_name), entry));
+                        let number = numbered_prefix(&ticket_name);
+                        if !ticket_numbers.insert(number) {
+                            tracing::warn!(
+                                epic = %name,
+                                ticket = %ticket_name,
+                                "duplicate ticket number under an epic directory; the layout is invalid"
+                            );
+                        }
+                        tickets.push((number, entry));
                     }
                 }
             }
@@ -199,7 +222,19 @@ impl DocStore {
                 return None;
             }
         };
-        let (status, feature, supersedes) = metadata_of(kind, &document.content, &file);
+        let (status, feature, supersedes, depends_on) = metadata_of(kind, &document.content, &file);
+        let (orphaned, feature_orphaned) = if kind == DocKind::Ticket {
+            let epic = epic.clone().unwrap_or_default();
+            let feature_orphaned = feature
+                .as_deref()
+                .is_some_and(|feature| feature_file_missing(&self.root, feature));
+            (
+                epic_description_missing(&self.root, &epic).await,
+                feature_orphaned,
+            )
+        } else {
+            (false, false)
+        };
 
         Some(DocEntry {
             path: path.clone(),
@@ -208,6 +243,9 @@ impl DocStore {
             status,
             epic,
             feature,
+            depends_on,
+            orphaned,
+            feature_orphaned,
             supersedes,
         })
     }
@@ -300,6 +338,9 @@ pub(crate) fn feature_entries(root: &Path) -> (Vec<DocEntry>, Vec<String>) {
                 .map(|status| status.as_str().to_string()),
             epic: None,
             feature: None,
+            depends_on: Vec::new(),
+            orphaned: false,
+            feature_orphaned: false,
             supersedes: None,
         });
     }
@@ -308,22 +349,24 @@ pub(crate) fn feature_entries(root: &Path) -> (Vec<DocEntry>, Vec<String>) {
     (entries, warnings)
 }
 
-/// The status, feature binding and supersedes pointer of a document, parsed
-/// from a single front matter pass. Only tickets carry a feature binding and
-/// only decisions carry a supersedes pointer.
+/// The status, feature binding, supersedes pointer and ticket dependencies of a
+/// document, parsed from a single front matter pass. Only tickets carry a
+/// feature binding and a dependency list, and only decisions carry a supersedes
+/// pointer.
 fn metadata_of(
     kind: DocKind,
     content: &str,
     file: &str,
-) -> (Option<String>, Option<String>, Option<u32>) {
+) -> (Option<String>, Option<String>, Option<u32>, Vec<u32>) {
     match kind {
-        DocKind::Core(_) => (None, None, None),
+        DocKind::Core(_) => (None, None, None, Vec::new()),
         DocKind::Epic => {
             let meta = frontmatter::parse_epic(content, file);
             (
                 meta.status.map(|status| status.as_str().to_owned()),
                 None,
                 None,
+                Vec::new(),
             )
         }
         DocKind::Feature => {
@@ -332,6 +375,7 @@ fn metadata_of(
                 meta.status.map(|status| status.as_str().to_owned()),
                 None,
                 None,
+                Vec::new(),
             )
         }
         DocKind::Decision => {
@@ -340,18 +384,52 @@ fn metadata_of(
                 meta.status.map(|status| status.as_str().to_owned()),
                 None,
                 meta.supersedes,
+                Vec::new(),
             )
         }
         DocKind::Ticket => {
-            let meta = frontmatter::parse_ticket(content, file);
+            let meta = frontmatter::TicketMeta::from_meta(frontmatter::parse_ticket(content, file));
             (
                 meta.status.map(|status| status.as_str().to_owned()),
-                meta.feature
-                    .map(|feature| feature.strip_suffix(".md").unwrap_or(&feature).to_owned()),
+                meta.feature,
                 None,
+                meta.depends_on,
             )
         }
     }
+}
+
+/// Reports whether the epic directory of a ticket has no `description.md`, so
+/// the ticket is orphaned while keeping its directory as the epic (ticket 0048).
+async fn epic_description_missing(root: &Path, epic: &str) -> bool {
+    let raw = format!("sdlc/epics/{epic}/description.md");
+    let Ok(path) = DocPath::parse(&raw) else {
+        return true;
+    };
+    if layout::kind(path.as_path()) != Some(DocKind::Epic) {
+        return true;
+    }
+    let file = root.join(path.as_path());
+    !tokio::fs::metadata(&file)
+        .await
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
+/// Reports whether the feature file a ticket names no longer resolves, so the
+/// ticket is feature-orphaned without being an orphan by epic (ticket 0048).
+fn feature_file_missing(root: &Path, feature: &str) -> bool {
+    let raw = format!("sdlc/features/{feature}.md");
+    let Ok(path) = DocPath::parse(&raw) else {
+        return true;
+    };
+    if layout::kind(path.as_path()) != Some(DocKind::Feature) {
+        return true;
+    }
+    let file = root.join(path.as_path());
+    !std::fs::metadata(&file)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
 }
 
 /// Reports whether a raw layout path names a document of the expected kind.
@@ -623,6 +701,12 @@ mod tests {
         assert_eq!(entry.kind, DocKind::Ticket);
         assert_eq!(entry.epic.as_deref(), Some("0002-ghost"));
         assert_eq!(entry.status.as_deref(), Some("todo"));
+        assert!(
+            entry.orphaned,
+            "a ticket whose epic has no description is orphaned but still listed"
+        );
+        assert!(!entry.feature_orphaned);
+        assert!(entry.depends_on.is_empty());
     }
 
     #[tokio::test]
@@ -641,6 +725,187 @@ mod tests {
         assert_eq!(entry.kind, DocKind::Ticket);
         assert_eq!(entry.status.as_deref(), Some("todo"));
         assert_eq!(entry.feature.as_deref(), Some("export"));
+    }
+
+    #[tokio::test]
+    async fn tree_reports_the_typed_ticket_metadata_of_a_valid_ticket() {
+        let (dir, store) = store_in_temp().await;
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/description.md",
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        );
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0002-add-export.md",
+            "---\nstatus: in-progress\nfeature: export\ndepends_on: [\"0004\", \"0005\"]\n---\n\n# 0002: Add export\n",
+        );
+        write(
+            &dir,
+            "sdlc/features/export.md",
+            "---\nstatus: shipped\n---\n\n# Export\n",
+        );
+
+        let tree = store.tree().await;
+
+        assert_eq!(tree.docs.len(), 3);
+        let entry = tree
+            .docs
+            .iter()
+            .find(|entry| entry.kind == DocKind::Ticket)
+            .expect("a ticket");
+        assert_eq!(entry.epic.as_deref(), Some("0001-foundation"));
+        assert_eq!(entry.feature.as_deref(), Some("export"));
+        assert_eq!(entry.status.as_deref(), Some("in-progress"));
+        assert_eq!(entry.depends_on, vec![4, 5]);
+        assert!(!entry.orphaned);
+        assert!(!entry.feature_orphaned);
+    }
+
+    #[tokio::test]
+    async fn tree_marks_a_stale_feature_without_orphaning_the_epic() {
+        let (dir, store) = store_in_temp().await;
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/description.md",
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        );
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0001-project.md",
+            "---\nstatus: todo\nfeature: export\ndepends_on: [\"0004\", \"0005\"]\n---\n\n# 0001: Project skeleton\n",
+        );
+
+        let tree = store.tree().await;
+
+        assert_eq!(tree.docs.len(), 2);
+        let entry = tree
+            .docs
+            .iter()
+            .find(|entry| entry.kind == DocKind::Ticket)
+            .expect("a ticket");
+        assert_eq!(entry.epic.as_deref(), Some("0001-foundation"));
+        assert!(!entry.orphaned, "the epic still has its description");
+        assert!(
+            entry.feature_orphaned,
+            "a feature that no longer resolves orphans the ticket's feature only"
+        );
+    }
+
+    #[tokio::test]
+    async fn renaming_an_epic_keeps_its_tickets_grouped_under_the_new_epic() {
+        let (dir, store) = store_in_temp().await;
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/description.md",
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        );
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0001-project.md",
+            "---\nstatus: todo\n---\n\n# 0001: Project skeleton\n",
+        );
+
+        let from =
+            DocPath::parse("sdlc/epics/0001-foundation/description.md").expect("valid epic path");
+        let to =
+            DocPath::parse("sdlc/epics/0001-platform/description.md").expect("valid epic path");
+        let moved = store
+            .rename(&from, &to)
+            .await
+            .expect("the epic rename should succeed");
+
+        let tree = store.tree().await;
+        let entry = tree
+            .docs
+            .iter()
+            .find(|entry| entry.kind == DocKind::Ticket)
+            .expect("the renamed ticket is still listed");
+        assert_eq!(entry.epic.as_deref(), Some("0001-platform"));
+        assert!(
+            !entry.orphaned,
+            "renaming an epic directory cannot orphan its tickets"
+        );
+        assert_eq!(
+            moved.as_path().to_string_lossy(),
+            "sdlc/epics/0001-platform/description.md"
+        );
+    }
+
+    #[tokio::test]
+    async fn tree_sorts_tickets_numerically_within_their_epic() {
+        let (dir, store) = store_in_temp().await;
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/description.md",
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        );
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0010-late.md",
+            "---\nstatus: todo\n---\n\n# 0010: Late\n",
+        );
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0009-early.md",
+            "---\nstatus: todo\n---\n\n# 0009: Early\n",
+        );
+
+        let tree = store.tree().await;
+        let tickets: Vec<&DocEntry> = tree
+            .docs
+            .iter()
+            .filter(|entry| entry.kind == DocKind::Ticket)
+            .collect();
+
+        assert_eq!(tickets.len(), 2);
+        assert_eq!(
+            tickets[0].path.as_path(),
+            std::path::Path::new("sdlc/epics/0001-foundation/tickets/0009-early.md")
+        );
+        assert_eq!(
+            tickets[1].path.as_path(),
+            std::path::Path::new("sdlc/epics/0001-foundation/tickets/0010-late.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn tree_lists_every_ticket_of_a_duplicate_number_once() {
+        let (dir, store) = store_in_temp().await;
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/description.md",
+            "---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+        );
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0002-add-export.md",
+            "---\nstatus: todo\n---\n\n# 0002: Add export\n",
+        );
+        write(
+            &dir,
+            "sdlc/epics/0001-foundation/tickets/0002-add-import.md",
+            "---\nstatus: todo\n---\n\n# 0002: Add import\n",
+        );
+
+        let tree = store.tree().await;
+
+        // Both tickets are listed, each once, even though the layout is invalid.
+        assert_eq!(tree.docs.len(), 3);
+        let tickets: Vec<&DocEntry> = tree
+            .docs
+            .iter()
+            .filter(|entry| entry.kind == DocKind::Ticket)
+            .collect();
+        assert_eq!(tickets.len(), 2);
+        assert_eq!(
+            tickets[0].path.as_path(),
+            std::path::Path::new("sdlc/epics/0001-foundation/tickets/0002-add-export.md")
+        );
+        assert_eq!(
+            tickets[1].path.as_path(),
+            std::path::Path::new("sdlc/epics/0001-foundation/tickets/0002-add-import.md")
+        );
     }
 
     #[tokio::test]

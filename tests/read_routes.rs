@@ -171,7 +171,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": null,
                     "supersedes": null,
                     "epic": null,
-                    "feature": null
+                    "feature": null,
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 },
                 {
                     "path": "sdlc/architecture.md",
@@ -180,7 +183,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": null,
                     "supersedes": null,
                     "epic": null,
-                    "feature": null
+                    "feature": null,
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 },
                 {
                     "path": "sdlc/conventions.md",
@@ -189,7 +195,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": null,
                     "supersedes": null,
                     "epic": null,
-                    "feature": null
+                    "feature": null,
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 },
                 {
                     "path": "AGENTS.md",
@@ -198,7 +207,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": null,
                     "supersedes": null,
                     "epic": null,
-                    "feature": null
+                    "feature": null,
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 },
                 {
                     "path": "sdlc/epics/0001-foundation/description.md",
@@ -207,7 +219,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": "planned",
                     "supersedes": null,
                     "epic": null,
-                    "feature": null
+                    "feature": null,
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 },
                 {
                     "path": "sdlc/epics/0001-foundation/tickets/0001-project.md",
@@ -216,7 +231,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": "todo",
                     "supersedes": null,
                     "epic": "0001-foundation",
-                    "feature": "export"
+                    "feature": "export",
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 },
                 {
                     "path": "sdlc/decisions/0003-use-axum.md",
@@ -225,7 +243,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": "proposed",
                     "supersedes": null,
                     "epic": null,
-                    "feature": null
+                    "feature": null,
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 },
                 {
                     "path": "sdlc/features/export.md",
@@ -234,7 +255,10 @@ async fn tree_returns_the_store_shape_exactly() {
                     "status": "shipped",
                     "supersedes": null,
                     "epic": null,
-                    "feature": null
+                    "feature": null,
+                    "depends_on": [],
+                    "orphaned": false,
+                    "feature_orphaned": false
                 }
             ]
         })
@@ -253,6 +277,32 @@ async fn tree_reports_a_missing_layout() {
         response.json(),
         serde_json::json!({ "layout_exists": false, "docs": [] })
     );
+}
+
+#[tokio::test]
+async fn tree_exposes_the_ticket_orphan_and_dependency_fields() {
+    let dir = TempDir::new().expect("temp project");
+    write(
+        &dir,
+        "sdlc/epics/0002-ghost/tickets/0001-orphan.md",
+        b"---\nstatus: todo\nfeature: export\ndepends_on: [\"0004\", \"0005\"]\n---\n\n# 0001: Orphan ticket\n",
+    );
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server.get("/api/tree").await;
+
+    assert_eq!(response.status, 200);
+    let tree_json = response.json();
+    let docs = tree_json["docs"]
+        .as_array()
+        .expect("the tree should carry docs");
+    assert_eq!(docs.len(), 1);
+    let entry = &docs[0];
+    assert_eq!(entry["kind"], "ticket");
+    assert_eq!(entry["epic"], "0002-ghost");
+    assert_eq!(entry["orphaned"], true);
+    assert_eq!(entry["feature_orphaned"], true);
+    assert_eq!(entry["depends_on"], serde_json::json!([4, 5]));
 }
 
 #[tokio::test]
