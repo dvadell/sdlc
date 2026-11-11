@@ -651,16 +651,22 @@ test("the enabled built-in prompts are all six that are ready to use", () => {
 
 test("clicking the ticket-generation prompt fills the composer and attaches the conventions", () => {
   state.chat.attachments = [];
+  state.chat.ticketContext = { feature: "export", epic: "0001-foundation" };
   state.current = { path: "sdlc/features/export.md", content: "# Export\n", savedContent: "# Export\n", hash: "hash-1" };
   renderChat();
 
   const prompts = document.querySelector("#chat-prompts");
   const generation = prompts.children.find((child) => child.id === "chat-prompt-generate-tickets");
   assert.ok(generation);
+  // The chosen feature and epic make the ticket-generation prompt ready (ticket 0049).
+  assert.equal(generation.disabled, false);
   generation.fire("click", {});
 
   assert.equal(inputElement.value, promptById("generate-tickets").text);
-  assert.deepEqual(state.chat.attachments, ["sdlc/conventions.md"]);
+  assert.deepEqual(state.chat.attachments, [
+    "sdlc/conventions.md",
+    "sdlc/epics/0001-foundation/description.md",
+  ]);
   assert.equal(fetchCalls.length, 0);
 });
 

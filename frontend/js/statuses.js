@@ -125,3 +125,30 @@ export function decisionNumberOf(path) {
   const prefix = stem.slice(0, dash);
   return Number(prefix);
 }
+
+// The epic directory a document path names, or null when the path is neither an
+// epic document (`sdlc/epics/<number>-<slug>/description.md`) nor a ticket of
+// one (`sdlc/epics/<number>-<slug>/tickets/<kebab>.md`); the directory is the
+// source of truth for the epic a ticket belongs to (ticket 0049).
+export function epicDirectoryOf(path) {
+  const segments = pathSegments(path);
+  const invalidSegment = (segment) =>
+    segment === ".." || segment === "." || segment === "" || segment.includes("\0") || segment.includes("\\");
+  if (segments.some((segment) => invalidSegment(segment))) {
+    // A path that the server's document path rules reject never names an epic.
+    return null;
+  }
+  const file = segments[segments.length - 1] ?? "";
+  const isEpicDocument =
+    segments[0] === "sdlc" && segments[1] === "epics" && segments.length === 4 && file === "description.md";
+  const isTicket =
+    segments[0] === "sdlc" && segments[1] === "epics" && segments.length === 5 && segments[3] === "tickets";
+  if (!isEpicDocument && !isTicket) {
+    return null;
+  }
+  const epic = segments[2] ?? "";
+  if (epic.length === 0 || !isNumberedSlug(epic)) {
+    return null;
+  }
+  return epic;
+}

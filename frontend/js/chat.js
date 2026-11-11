@@ -6,7 +6,7 @@ import { ApiError } from "./api.js";
 import { readSse } from "./sse.js";
 import { showProposal } from "./diff.js";
 import { PROMPTS, DISABLED_PROMPT_HINT } from "./prompts.js";
-import { statusKindOf } from "./statuses.js";
+import { statusKindOf, epicDirectoryOf } from "./statuses.js";
 
 // The abort controller of the reply in flight; null when the panel is idle.
 let abortController = null;
@@ -311,21 +311,10 @@ export function selectedFeature() {
 }
 
 // The epic directory of the open epic document or of an open ticket, or null when
-// the open document is neither (ticket 0049).
+// the open document is neither (ticket 0049). The directory is the source of
+// truth for the epic, so the shared helper resolves it from the path alone.
 export function selectedEpic() {
-  const path = state.current?.path;
-  if (typeof path !== "string" || path.length === 0) {
-    return null;
-  }
-  const segments = path.replace(/^\//, "").split("/");
-  const isEpicDocument =
-    segments[0] === "sdlc" && segments[1] === "epics" && segments[segments.length - 1] === "description.md";
-  const isTicket = segments[0] === "sdlc" && segments[1] === "epics" && segments[3] === "tickets";
-  if (!isEpicDocument && !isTicket) {
-    return null;
-  }
-  const epic = segments[2] ?? "";
-  return epic.length > 0 ? epic : null;
+  return epicDirectoryOf(state.current?.path);
 }
 
 // The ticket-generation context: the feature slug and the epic directory the
@@ -364,9 +353,8 @@ export function applyPrompt(prompt) {
     // feature document is the open document when it is a feature, so the dedup of
     // ticket 0039 keeps it from being sent twice.
     const context = ticketContext();
-    const epic = context?.epic ?? selectedEpic();
-    if (epic) {
-      addAttachment(`sdlc/epics/${epic}/description.md`);
+    if (context) {
+      addAttachment(`sdlc/epics/${context.epic}/description.md`);
     }
   }
 }
@@ -499,8 +487,9 @@ function renderPrompts(container) {
     // The ticket-generation prompt only appears when a feature and an epic are
     // selected (ticket 0049); the other built-in prompts are always ready.
     const contextReady = prompt.id !== "generate-tickets" || ticketContext() !== null;
-    button.disabled = Boolean(prompt.disabled) || !contextReady;
-    button.title = prompt.disabled || !contextReady ? DISABLED_PROMPT_HINT : prompt.title;
+    const gated = Boolean(prompt.disabled) || !contextReady;
+    button.disabled = gated;
+    button.title = gated ? DISABLED_PROMPT_HINT : prompt.title;
     button.addEventListener("click", () => applyPrompt(prompt));
     container.appendChild(button);
   }

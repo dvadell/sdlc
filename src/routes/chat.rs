@@ -188,6 +188,12 @@ fn validate_ticket_context(
         return Err(ApiError::bad_request());
     }
 
+    if feature.is_none() && epic.is_none() {
+        // A provided context with no usable fields is a no-op; downgrade it to a
+        // plain turn rather than a context that skips epic enforcement.
+        return Ok(None);
+    }
+
     Ok(Some(TicketContext { feature, epic }))
 }
 
@@ -275,6 +281,9 @@ fn frames(
         },
         move |state| {
             let value = proposals.clone();
+            // The ticket context is only needed once the upstream reply ended
+            // cleanly, so the clone lives with this closure step instead of
+            // moving the captured context into the async block per upstream delta.
             let ticket_context = ticket_context.clone();
             async move {
                 let proposals = value;
@@ -301,7 +310,7 @@ fn frames(
                             // so a partial reply is never parsed.
                             let parsed = blocks::parse(&accumulated);
                             let mut frames: VecDeque<Result<String, ChatError>> =
-                                finalize_reply(&parsed, &proposals, ticket_context)
+                                finalize_reply(&parsed, &proposals, ticket_context.as_ref())
                                     .await
                                     .into_iter()
                                     .collect();
@@ -347,7 +356,7 @@ fn frames(
 async fn finalize_reply(
     parsed: &Parsed,
     proposals: &ProposalService,
-    ticket_context: Option<TicketContext>,
+    ticket_context: Option<&TicketContext>,
 ) -> Vec<Result<String, ChatError>> {
     let mut frames = Vec::new();
 
@@ -362,10 +371,7 @@ async fn finalize_reply(
         return frames;
     }
 
-    match proposals
-        .create(&parsed.blocks, ticket_context.as_ref())
-        .await
-    {
+    match proposals.create(&parsed.blocks, ticket_context).await {
         Ok(proposal) => {
             frames.push(Ok(frame_proposal(&proposal, &parsed.warnings)));
             frames.push(Ok(frame_done()));

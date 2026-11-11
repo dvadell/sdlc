@@ -191,12 +191,10 @@ impl ProposalService {
                 // the person chose, so a proposal outside that epic is refused
                 // before anything is classified or stored.
                 if crate::store::layout::kind(path.as_path()) == Some(DocKind::Ticket)
-                    && context.epic.is_some()
+                    && let Some(selected) = context.epic.as_deref()
+                    && crate::store::layout::epic_of(path.as_path()) != Some(selected)
                 {
-                    let selected = context.epic.as_deref().expect("the epic is set");
-                    if crate::store::layout::epic_of(path.as_path()) != Some(selected) {
-                        return Err(ProposalError::InvalidPath(raw_path.to_string()));
-                    }
+                    return Err(ProposalError::InvalidPath(raw_path.to_string()));
                 }
             }
 
@@ -1135,12 +1133,20 @@ mod tests {
         assert_eq!(proposal.changes.len(), 2);
         assert_eq!(proposal.changes[0].action, Action::Create);
         assert_eq!(
-            proposal.changes[0].path.as_path().display().to_string(),
+            proposal.changes[0]
+                .path
+                .as_path()
+                .to_string_lossy()
+                .into_owned(),
             "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
         );
         assert_eq!(proposal.changes[1].action, Action::Create);
         assert_eq!(
-            proposal.changes[1].path.as_path().display().to_string(),
+            proposal.changes[1]
+                .path
+                .as_path()
+                .to_string_lossy()
+                .into_owned(),
             "sdlc/epics/0001-foundation/tickets/0002-add-import.md"
         );
         assert!(service.get(&proposal.id).is_some());
@@ -1148,8 +1154,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_ticket_draft_outside_the_chosen_epic_is_rejected() {
-        let (_dir, _store, service) = service_in_temp_with_store().await;
-        feature_file(&_dir, "export.md", "# Export\n");
+        let (dir, _store, service) = service_in_temp_with_store().await;
+        feature_file(&dir, "export.md", "# Export\n");
         let context = TicketContext {
             feature: Some("export".to_string()),
             epic: Some("0001-foundation".to_string()),
