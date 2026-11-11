@@ -207,7 +207,7 @@ impl ProposalService {
             // Ticket numbering runs before the path parsing and duplicate
             // rejection of ticket 0041 (ticket 0050): a ticket-generation create
             // is numbered first and then validated like any other block.
-            let (raw_path, content) = if let Some(context) = ticket_context
+            let (raw_path, mut content) = if let Some(context) = ticket_context
                 && let Some(block_content) = content.as_deref()
             {
                 match self
@@ -245,24 +245,21 @@ impl ProposalService {
                 }
             }
 
-            let (action, new_content, base_hash, base_content) = match content.as_deref() {
+            let (action, new_content, base_hash, base_content) = match content.take() {
                 Some(content) => {
                     let document = self.store.read(&path).await;
                     match document {
                         Ok(document) => (
                             Action::Modify,
-                            Some(content.to_string()),
+                            Some(content),
                             Some(document.hash),
                             document.content,
                         ),
                         // A missing file is a create; the base hash of a create is
                         // `None` because there is no content the proposal replaced.
-                        Err(StoreError::NotFound(_)) => (
-                            Action::Create,
-                            Some(content.to_string()),
-                            None,
-                            String::new(),
-                        ),
+                        Err(StoreError::NotFound(_)) => {
+                            (Action::Create, Some(content), None, String::new())
+                        }
                         Err(error) => return Err(error.into()),
                     }
                 }
@@ -344,9 +341,12 @@ impl ProposalService {
         let Some((epic, ticket_name)) = ticket_segments(raw_path) else {
             return Ok(None);
         };
-        if context.epic.as_deref() != Some(epic) && epic != "<epic>" {
+        if context.epic.is_none() || context.epic.as_deref() != Some(epic) && epic != "<epic>" {
             // The draft belongs to another epic, so numbering must not rewrite
             // it into the selected one; the path check of ticket 0041 refuses it.
+            // Without a chosen epic there is nothing to allocate a number
+            // against, so the block keeps its raw path and the path validation
+            // of the ticket answers it.
             return Ok(None);
         }
 
@@ -695,7 +695,7 @@ fn ticket_title(content: &str, ticket_name: &str) -> Result<String, StoreError> 
     // carries the slug the model proposed.
     let stem = ticket_name.strip_suffix(".md").unwrap_or(ticket_name);
 
-    Ok(stem.trim().replace('-', " "))
+    Ok(strip_ticket_number(stem).trim().replace('-', " "))
 }
 
 /// The first ATX heading of a document body: the index of its line and its text
@@ -711,8 +711,9 @@ fn first_heading(body: &str) -> Option<(usize, String)> {
         }
         let level = trimmed.len() - trimmed.trim_start_matches('#').len();
         let text = &trimmed[level..];
-        if !text.is_empty() && !text.starts_with(' ') {
-            // A `#Title` without the ATX space is not a heading.
+        // A heading needs a space after the hashes and non-empty text; a
+        // `#Title` without the space or a bare `###` is not a heading.
+        if text.is_empty() || !text.starts_with(' ') {
             continue;
         }
         return Some((index, text.trim().to_string()));
@@ -810,7 +811,7 @@ fn rewrite_ticket(
     let body = if let Some(stripped) = new_body.strip_prefix('\n') {
         stripped.to_string()
     } else {
-        new_body.clone()
+        new_body
     };
     let new_content = match front_matter_text {
         Some(front_matter) => format!("---\n{front_matter}\n---\n\n{body}"),
@@ -823,7 +824,10 @@ fn rewrite_ticket(
 /// The key of one front matter line, without its value.
 fn front_key(line: &str) -> Option<&str> {
     let line = line.trim();
-    line.split_once(':').map(|(key, _)| key.trim())
+    let key = line.split_once(':')?.0.trim();
+    // Anchor on the key itself, after an optional YAML list marker, so a list
+    // entry such as `- feature: x` reads as the `feature` key (ticket 0050).
+    Some(key.strip_prefix("- ").unwrap_or(key))
 }
 
 #[cfg(test)]
@@ -1622,6 +1626,30 @@ mod tests {
         let context = ticket_context("0001-foundation", Some("export"));
         let blocks = [write_block(
             "sdlc/epics/0001-foundation/tickets/add-export.md",
+            "Some description of the export.\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(
+            change_path(&proposal.changes[0]),
+            "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+        );
+        assert_eq!(
+            proposal.changes[0].new_content.as_deref(),
+            Some("---\nfeature: export\n---\n\nSome description of the export.\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ticket_create_without_a_usable_heading_strips_the_model_number() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0001-foundation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0001-foundation/tickets/0007-add-export.md",
             "Some description of the export.\n",
         )];
 
