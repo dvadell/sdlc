@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use sdlc::chat::build;
+use sdlc::chat::{ExistingTicket, TicketContext, build};
 use sdlc::config::{CliArgs, Config};
 use sdlc::store::{DocPath, Document, content_hash};
 use sdlc::{ServerError, serve};
@@ -210,12 +210,34 @@ fn chat_body(
     .expect("the chat body should serialize")
 }
 
+fn chat_body_with_ticket_context(
+    messages: serde_json::Value,
+    open_doc: &str,
+    attachments: serde_json::Value,
+    ticket_context: serde_json::Value,
+) -> String {
+    let mut body = serde_json::Map::new();
+    body.insert("messages".to_string(), messages);
+    body.insert("open_doc".to_string(), json!(open_doc));
+    body.insert("attachments".to_string(), attachments);
+    body.insert("ticket_context".to_string(), ticket_context);
+    serde_json::to_string(&serde_json::Value::Object(body)).expect("the chat body should serialize")
+}
+
 fn user_message(content: &str) -> serde_json::Value {
     json!([{ "role": "user", "content": content }])
 }
 
 fn chat_request(messages: serde_json::Value, open_doc: &str) -> String {
     chat_body(messages, open_doc, json!([]))
+}
+
+fn chat_request_with_ticket_context(
+    messages: serde_json::Value,
+    open_doc: &str,
+    ticket_context: serde_json::Value,
+) -> String {
+    chat_body_with_ticket_context(messages, open_doc, json!([]), ticket_context)
 }
 
 #[tokio::test]
@@ -1181,5 +1203,223 @@ async fn an_ordinary_reply_without_blocks_emits_no_proposal() {
         )
     );
 
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn a_reply_that_modifies_and_deletes_an_existing_ticket_emits_the_regeneration_proposal() {
+    let mock_server = MockServer::start().await;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"I will update the export ticket and retire the import ticket.\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== FILE: sdlc/epics/0001-foundation/tickets/0001-add-export.md ===\\n---\\nstatus: in-progress\\nfeature: export\\n---\\n\\n# 0001: Add export\\n\\n## Description\\n\\nAdd the export endpoint.\\n=== END FILE ===\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n=== DELETE: sdlc/epics/0001-foundation/tickets/0002-add-import.md ===\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/description.md",
+        b"---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+    );
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/tickets/0001-add-export.md",
+        b"---\nstatus: todo\nfeature: export\n---\n\n# 0001: Add export\n\n## Description\n\nAdd the export endpoint.\n",
+    );
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/tickets/0002-add-import.md",
+        b"---\nstatus: todo\nfeature: export\n---\n\n# 0002: Add import\n\n## Description\n\nAdd the import endpoint.\n",
+    );
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request_with_ticket_context(
+            user_message("update the tickets"),
+            "sdlc/features/export.md",
+            json!({ "feature": "export", "epic": "0001-foundation" }),
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert!(
+        response.body.ends_with("event: done\ndata: {}\n\n"),
+        "the regeneration reply should end with the done frame: {}",
+        response.body
+    );
+
+    let delta_at = response
+        .body
+        .find("event: delta")
+        .expect("the delta frame should be in the body");
+    let proposal_at = response
+        .body
+        .find("event: proposal")
+        .expect("the proposal frame should be in the body");
+    let done_at = response
+        .body
+        .find("event: done")
+        .expect("the done frame should be in the body");
+    assert!(
+        delta_at < proposal_at && proposal_at < done_at,
+        "the frames should stream delta, proposal, done: {}",
+        response.body
+    );
+
+    let proposal = frame_data(frame_of(&response.body, "proposal"));
+    let changes = proposal["changes"]
+        .as_array()
+        .expect("the proposal changes");
+    assert_eq!(changes.len(), 2);
+
+    // The modified existing ticket keeps its numbered path and becomes a
+    // modify carrying the new content in its diff.
+    assert_eq!(
+        changes[0]["path"],
+        "sdlc/epics/0001-foundation/tickets/0001-add-export.md"
+    );
+    assert_eq!(changes[0]["action"], "modify");
+    assert!(
+        changes[0]["diff"]
+            .as_str()
+            .expect("the proposal diff should be a string")
+            .contains("+status: in-progress"),
+        "the proposal diff should carry the new content of the ticket: {}",
+        changes[0]["diff"]
+    );
+
+    // The deleted existing ticket becomes a delete with the old content in
+    // its diff.
+    assert_eq!(
+        changes[1]["path"],
+        "sdlc/epics/0001-foundation/tickets/0002-add-import.md"
+    );
+    assert_eq!(changes[1]["action"], "delete");
+    assert!(
+        changes[1]["diff"]
+            .as_str()
+            .expect("the proposal diff should be a string")
+            .contains("Add the import endpoint"),
+        "the proposal diff should carry the old content of the ticket: {}",
+        changes[1]["diff"]
+    );
+
+    let warnings = proposal["warnings"]
+        .as_array()
+        .expect("the proposal warnings");
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0],
+        json!("2 existing tickets included"),
+        "the proposal should note how many tickets were included"
+    );
+
+    mock_server.verify().await;
+}
+
+#[tokio::test]
+async fn a_ticket_generation_request_includes_the_existing_tickets_of_the_selected_epic() {
+    let mock_server = MockServer::start().await;
+
+    let open = Document {
+        path: DocPath::parse("sdlc/features/export.md")
+            .expect("the open document path should be valid"),
+        content: "# Export\n".to_string(),
+        hash: content_hash(b"# Export\n"),
+    };
+    let ticket_context = TicketContext {
+        feature: Some("export".to_string()),
+        epic: Some("0001-foundation".to_string()),
+        existing: vec![
+            ExistingTicket {
+                path: "sdlc/epics/0001-foundation/tickets/0001-add-export.md".to_string(),
+                content: "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Add export\n"
+                    .to_string(),
+            },
+            ExistingTicket {
+                path: "sdlc/epics/0001-foundation/tickets/0002-add-import.md".to_string(),
+                content: "---\nstatus: todo\nfeature: export\n---\n\n# 0002: Add import\n"
+                    .to_string(),
+            },
+        ],
+    };
+    let messages = build(&open, &[], vec![], Some(&ticket_context));
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"I will draft the export tickets.\"}}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "model": "gpt-4o",
+            "stream": true,
+            "messages": [ { "role": "system", "content": messages[0].content.clone() } ],
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(body.as_bytes().to_vec(), "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/features/export.md", b"# Export\n");
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/description.md",
+        b"---\nstatus: planned\n---\n\n# 0001: Foundation\n",
+    );
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/tickets/0001-add-export.md",
+        b"---\nstatus: todo\nfeature: export\n---\n\n# 0001: Add export\n",
+    );
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/tickets/0002-add-import.md",
+        b"---\nstatus: todo\nfeature: export\n---\n\n# 0002: Add import\n",
+    );
+    // The ticket of another feature is in the selected epic but must not be
+    // part of the regeneration context.
+    write(
+        &dir,
+        "sdlc/epics/0001-foundation/tickets/0003-add-audit.md",
+        b"---\nstatus: todo\nfeature: other\n---\n\n# 0003: Add audit\n",
+    );
+    let server = TestServer::start(
+        dir.path(),
+        &[
+            ("SDLC_AI_BASE_URL", Some(mock_server.uri())),
+            ("SDLC_AI_MODEL", Some("gpt-4o".to_string())),
+        ],
+    )
+    .await;
+
+    let response = server
+        .chat(&chat_request_with_ticket_context(
+            user_message("hello"),
+            "sdlc/features/export.md",
+            json!({ "feature": "export", "epic": "0001-foundation" }),
+        ))
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert!(response.body.contains("event: done"));
     mock_server.verify().await;
 }

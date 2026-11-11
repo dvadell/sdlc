@@ -183,6 +183,10 @@ impl ProposalService {
     ///
     /// The proposal is stored in memory and returned; it only becomes real when
     /// a later ticket accepts it.
+    ///
+    /// When the ticket context of ticket 0051 carries the tickets that already
+    /// exist for the feature, the proposal warnings carry the note of how many
+    /// existing tickets were included, above the diff the person reviews.
     pub async fn create(
         &self,
         blocks: &[Block],
@@ -292,6 +296,18 @@ impl ProposalService {
                 base_hash,
                 diff,
             });
+        }
+
+        if let Some(context) = ticket_context
+            && !context.existing.is_empty()
+        {
+            // The regeneration context of ticket 0051: the tickets that already
+            // existed for the feature in the selected epic are part of this
+            // proposal's context, so the review is told how many were included.
+            warnings.push(format!(
+                "{} existing tickets included",
+                context.existing.len()
+            ));
         }
 
         if changes.is_empty() {
@@ -833,7 +849,7 @@ fn front_key(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chat::Block;
+    use crate::chat::{Block, ExistingTicket};
     use crate::store::{DocStore, content_hash};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1430,6 +1446,7 @@ mod tests {
         let context = TicketContext {
             feature: Some("export".to_string()),
             epic: Some("0001-foundation".to_string()),
+            existing: Vec::new(),
         };
         let blocks = [
             write_block(
@@ -1476,6 +1493,7 @@ mod tests {
         let context = TicketContext {
             feature: Some("export".to_string()),
             epic: Some("0001-foundation".to_string()),
+            existing: Vec::new(),
         };
         let blocks = [write_block(
             "sdlc/epics/0002-platform/tickets/0001-add-export.md",
@@ -1497,6 +1515,7 @@ mod tests {
         TicketContext {
             feature: feature.map(|feature| feature.to_string()),
             epic: Some(epic.to_string()),
+            existing: Vec::new(),
         }
     }
 
@@ -1890,6 +1909,59 @@ mod tests {
             proposal.changes[0].new_content.as_deref(),
             Some("# 0003: Add Export\n")
         );
+    }
+
+    #[tokio::test]
+    async fn a_regeneration_context_without_existing_tickets_adds_no_note() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = ticket_context("0007-ticket-generation", Some("export"));
+        let blocks = [write_block(
+            "sdlc/epics/0007-ticket-generation/tickets/0003-add-audit.md",
+            "# 0003: Add Audit\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(proposal.changes.len(), 1);
+        assert_eq!(proposal.warnings, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_regeneration_context_with_existing_tickets_notes_the_inclusion() {
+        let (_dir, _store, service) = service_in_temp_with_store().await;
+        let context = TicketContext {
+            feature: Some("export".to_string()),
+            epic: Some("0007-ticket-generation".to_string()),
+            existing: vec![
+                ExistingTicket {
+                    path: "sdlc/epics/0007-ticket-generation/tickets/0001-add-export.md"
+                        .to_string(),
+                    content: "# 0001: Add Export\n".to_string(),
+                },
+                ExistingTicket {
+                    path: "sdlc/epics/0007-ticket-generation/tickets/0002-add-import.md"
+                        .to_string(),
+                    content: "# 0002: Add Import\n".to_string(),
+                },
+            ],
+        };
+        let blocks = [write_block(
+            "sdlc/epics/0007-ticket-generation/tickets/0003-add-audit.md",
+            "# 0003: Add Audit\n",
+        )];
+
+        let proposal = service
+            .create(&blocks, Some(&context))
+            .await
+            .expect("the proposal");
+
+        assert_eq!(proposal.changes.len(), 1);
+        assert_eq!(proposal.changes[0].action, Action::Create);
+        assert_eq!(proposal.warnings.len(), 1);
+        assert_eq!(proposal.warnings[0], "2 existing tickets included");
     }
 
     #[tokio::test]

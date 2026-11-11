@@ -17,11 +17,13 @@ use axum::{
 use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 
-use crate::chat::{ChatError, Message, Parsed, TicketContext, blocks, build, parse};
+use crate::chat::{
+    ChatError, ExistingTicket, Message, Parsed, TicketContext, blocks, build, parse,
+};
 use crate::error::ApiError;
 use crate::proposal::{Action, Proposal, ProposalService};
 use crate::state::AppState;
-use crate::store::{DocPath, Document, StoreError};
+use crate::store::{DocKind, DocPath, Document, StoreError};
 
 /// Maximum accepted chat request body: 64 KiB, enough for a bounded
 /// conversation and small documents, small enough to fail oversized payloads
@@ -55,12 +57,9 @@ pub(crate) async fn chat(
     let open = load_document(&state, &turns.open_doc).await?;
     let attachments = load_attachments(&state, &turns.attachments).await;
 
-    let messages = build(
-        &open,
-        &attachments,
-        turns.history,
-        turns.ticket_context.as_ref(),
-    );
+    let ticket_context = existing_tickets(&state, turns.ticket_context.as_ref()).await;
+
+    let messages = build(&open, &attachments, turns.history, ticket_context.as_ref());
     let source: Pin<Box<dyn Stream<Item = Result<String, ChatError>> + Send>> =
         match state.chat.send(&messages).await {
             Ok(response) => Box::pin(parse(response.bytes_stream())),
@@ -70,8 +69,58 @@ pub(crate) async fn chat(
     Ok(sse_response(frames(
         source,
         state.proposals.clone(),
-        turns.ticket_context.clone(),
+        ticket_context,
     )))
+}
+
+/// Attaches the tickets that already exist for the feature in the selected epic
+/// to the ticket-generation context of a turn (ticket 0051).
+///
+/// The feature and the epic of the context select the regeneration scope: the
+/// tickets of that feature under that epic are loaded from the store, in ticket
+/// number order, and carried as the existing tickets of the context, so the
+/// prompt of the regeneration and the proposal it builds see them. A turn
+/// without a context, or with an incomplete one, keeps its plain context, and the
+/// tickets of other features or epics are never part of it.
+async fn existing_tickets(
+    state: &AppState,
+    context: Option<&TicketContext>,
+) -> Option<TicketContext> {
+    let context = context.as_ref()?;
+    let context = TicketContext {
+        feature: context.feature.clone(),
+        epic: context.epic.clone(),
+        existing: context.existing.clone(),
+    };
+    let Some(epic) = context.epic.as_deref() else {
+        return Some(context);
+    };
+    let Some(feature) = context.feature.as_deref() else {
+        return Some(context);
+    };
+
+    let tree = state.store.tree().await;
+    let mut existing = Vec::new();
+    for entry in &tree.docs {
+        if entry.kind != DocKind::Ticket
+            || entry.epic.as_deref() != Some(epic)
+            || entry.feature.as_deref() != Some(feature)
+        {
+            continue;
+        }
+        if let Ok(document) = state.store.read(&entry.path).await {
+            existing.push(ExistingTicket {
+                path: entry.path.as_path().to_string_lossy().into_owned(),
+                content: document.content,
+            });
+        }
+    }
+
+    Some(TicketContext {
+        feature: context.feature.clone(),
+        epic: context.epic.clone(),
+        existing,
+    })
 }
 
 /// The body of a chat request.
@@ -85,7 +134,8 @@ pub(crate) struct ChatRequest {
     #[serde(default)]
     pub(crate) attachments: Vec<String>,
     /// The optional ticket-generation context: the feature slug and the epic
-    /// directory the next tickets are drafted for (ticket 0049).
+    /// directory the next tickets are drafted for, plus the tickets that already
+    /// exist for a regeneration (tickets 0049 and 0051).
     #[serde(default)]
     pub(crate) ticket_context: Option<TicketContext>,
 }
@@ -194,7 +244,11 @@ fn validate_ticket_context(
         return Ok(None);
     }
 
-    Ok(Some(TicketContext { feature, epic }))
+    Ok(Some(TicketContext {
+        feature,
+        epic,
+        existing: Vec::new(),
+    }))
 }
 
 /// Loads the open document of the conversation.

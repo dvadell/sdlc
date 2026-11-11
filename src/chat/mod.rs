@@ -10,4 +10,4 @@ pub use blocks::{Block, Parsed};
 pub use client::{ChatClient, ChatError, ChatMessage};
 pub use prompt::{Message, SYSTEM_PROMPT, build};
 pub use stream::parse;
-pub use ticket::TicketContext;
+pub use ticket::{ExistingTicket, TicketContext};
