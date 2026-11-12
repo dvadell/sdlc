@@ -5,7 +5,7 @@ import { createDoc, deleteDoc, getTree, moveDoc, scaffold } from "./api.js";
 import { showError, showResponseWarnings, showWarning, warningsToText } from "./errors.js";
 import { clearEditor } from "./editor.js";
 import { openDecisionCreateDialog, openTicketCreateDialog } from "./dialogs.js";
-import { STATUS_OPTIONS, decisionNumberOf } from "./statuses.js";
+import { STATUS_OPTIONS, decisionNumberOf, epicSlugOf } from "./statuses.js";
 
 // The groups of the document tree in the order the sidebar renders them. Tickets
 // will be grouped under their epic from ticket 0053 on; the flat per-group entry
@@ -117,7 +117,7 @@ function renameDestination(entry, newTitle) {
   const slug = slugifyTitle(newTitle);
   const segments = entry.path.split("/");
   if (entry.kind === "epic") {
-    const epic = segments[2] ?? "";
+    const epic = epicSlugOf(entry.path);
     const number = epic.split("-")[0] ?? "";
     return `sdlc/epics/${number}-${slug}/description.md`;
   }
@@ -159,7 +159,7 @@ function deleteMessage(entry) {
   const path = entry.path;
   let message = `Delete ${entry.kind} "${entry.title}" at ${path}? This cannot be undone.`;
   if (entry.kind === "epic") {
-    const epic = path.split("/")[2] ?? "";
+    const epic = epicSlugOf(path);
     const count = ticketCount(state.tree?.docs ?? [], epic);
     if (count > 0) {
       message += ` ${count} ${count === 1 ? "ticket is" : "tickets are"} still assigned; delete or move them first.`;
@@ -239,6 +239,9 @@ async function createFromGroup(group) {
 
   let epic;
   let feature;
+  let status;
+  let supersedes;
+  let documentTitle;
   if (kind === "ticket") {
     // Tickets create through the dialog of ticket 0052: the title, the required
     // epic select and the optional feature select replace the generic prompt
@@ -260,13 +263,10 @@ async function createFromGroup(group) {
       return;
     }
     feature = outcome.feature;
-    status = STATUS_OPTIONS.ticket[0];
+    status = outcome.status ?? STATUS_OPTIONS.ticket[0];
     documentTitle = ticketTitle;
   }
 
-  let status;
-  let supersedes;
-  let documentTitle;
   if (kind === "decision") {
     // Decisions create through the small native dialog of ticket 0032: the
     // title, the status and the optional supersedes target of the ADR, instead

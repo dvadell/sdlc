@@ -806,7 +806,10 @@ export function renderTicketLinks() {
     epicLink.href = `sdlc/epics/${epicDirectory}/description.md`;
     epicLink.addEventListener("click", (event) => {
       event.preventDefault();
-      void loadDocument(`sdlc/epics/${epicDirectory}/description.md`).catch(() => {});
+      void loadDocument(`sdlc/epics/${epicDirectory}/description.md`).catch((error) => {
+        console.error("Loading the ticket epic failed:", error);
+        showError(error);
+      });
     });
     element.append(epicLabel, epicLink);
   }
@@ -816,12 +819,9 @@ export function renderTicketLinks() {
   if (feature) {
     const featureSlug = String(feature).replace(/\.md$/, "");
     const featurePath = `sdlc/features/${featureSlug}.md`;
-    const featureExists = (state.tree?.docs ?? []).some(
-      (doc) => doc?.kind === "feature" && doc?.path === featurePath,
-    );
     const featureLabel = document.createElement("span");
     featureLabel.textContent = "Feature: ";
-    if (featureExists) {
+    if (featureResolves(featureSlug)) {
       const featureLink = document.createElement("a");
       featureLink.id = "ticket-feature-link";
       featureLink.className = "ticket-link";
@@ -829,7 +829,10 @@ export function renderTicketLinks() {
       featureLink.href = featurePath;
       featureLink.addEventListener("click", (event) => {
         event.preventDefault();
-        void loadDocument(featurePath).catch(() => {});
+        void loadDocument(featurePath).catch((error) => {
+          console.error("Loading the ticket feature failed:", error);
+          showError(error);
+        });
       });
       element.append(featureLabel, featureLink);
       return element;
@@ -838,7 +841,9 @@ export function renderTicketLinks() {
     missing.id = "ticket-feature-link";
     missing.className = "ticket-link";
     missing.textContent = `Feature: ${featureSlug} (unknown)`;
-    element.append(featureLabel, missing);
+    // The missing label carries the full text, so the label is not appended
+    // again and the prefix is not rendered twice (ticket 0052).
+    element.append(missing);
     return element;
   }
   return element;
@@ -1305,17 +1310,6 @@ export async function save({ allowDuringStatusSave = false } = {}) {
     const text = thisTextarea?.isConnected ? thisTextarea.value : content;
     const contentToSave = toSavedContent(text, savedContent);
     const response = await saveDoc(path, contentToSave, hash);
-    if (statusKindOf(path) === "ticket") {
-      // A ticket's `feature` line may have been edited by hand, which the save
-      // keeps; an unresolvable feature is surfaced as a warning on save instead of
-      // blocking the edit (ticket 0052).
-      const feature = ticketFeatureOf(contentToSave);
-      if (feature && !featureResolves(feature)) {
-        showWarning(
-          `The ticket feature "${feature}" does not resolve; create or rename the feature first.`,
-        );
-      }
-    }
     // Route the saved response through the shared outcome helper before the
     // document-switch guard, so both save paths share one outcome handling (ticket
     // 0030, final review round): a save that resolved just as the person switched
@@ -1327,6 +1321,19 @@ export async function save({ allowDuringStatusSave = false } = {}) {
       // bail out before capturing or writing any of the saved state.
       renderDirtyIndicator();
       return { skipped: true };
+    }
+    if (statusKindOf(path) === "ticket") {
+      // A ticket's `feature` line may have been edited by hand, which the save
+      // keeps; an unresolvable feature is surfaced as a warning on save instead of
+      // blocking the edit (ticket 0052). The warning rides the shared outcome
+      // handling, so it is only surfaced once the save resolved for a document
+      // that is still the selected one.
+      const feature = ticketFeatureOf(contentToSave);
+      if (feature && !featureResolves(feature)) {
+        showWarning(
+          `The ticket feature "${feature}" does not resolve; create or rename the feature first.`,
+        );
+      }
     }
     // Capture the state that belongs to the saved document before applying it,
     // so a response that resolves just as the person switches documents cannot

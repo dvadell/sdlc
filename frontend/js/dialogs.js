@@ -1,6 +1,6 @@
 //! The small native-dialog helper of the frontend (ticket 0032).
 
-import { STATUS_OPTIONS, decisionNumberOf } from "./statuses.js";
+import { STATUS_OPTIONS, decisionNumberOf, epicSlugOf, featureSlugOf } from "./statuses.js";
 
 // The pending supersedes value of the decision-create dialog: the raw string
 // and whether it names a finite decision number (ticket 0032).
@@ -237,11 +237,9 @@ export function openTicketCreateDialog(epics, features) {
     epicSelect.appendChild(epicPlaceholder);
     const epicChoices = (epics ?? [])
       .filter((epic) => epic?.kind === "epic")
-      .map((epic) => String(epic?.path ?? "").split("/")[2] ?? "");
+      .map((epic) => epicSlugOf(epic?.path))
+      .filter((epic) => epic);
     for (const epic of epicChoices) {
-      if (epic.length === 0) {
-        continue;
-      }
       const option = document.createElement("option");
       option.value = epic;
       option.textContent = epic;
@@ -258,12 +256,9 @@ export function openTicketCreateDialog(epics, features) {
     featureSelect.appendChild(noFeature);
     const featureChoices = (features ?? [])
       .filter((feature) => feature?.kind === "feature")
-      .map((feature) => String(feature?.path ?? "").split("/")[2] ?? "")
-      .map((slug) => slug.replace(/\.md$/, ""));
+      .map((feature) => featureSlugOf(feature?.path))
+      .filter((feature) => feature);
     for (const feature of featureChoices) {
-      if (feature.length === 0) {
-        continue;
-      }
       const option = document.createElement("option");
       option.value = feature;
       option.textContent = feature;

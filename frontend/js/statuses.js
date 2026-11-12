@@ -172,3 +172,39 @@ export function epicDirectoryOf(path) {
   }
   return epic;
 }
+
+// The epic directory a document path names, or null when the path is not an
+// epic document; the directory is the slug of the epic the document lives in
+// (ticket 0052).
+export function epicSlugOf(path) {
+  const segments = pathSegments(String(path ?? ""));
+  const invalidSegment = (segment) =>
+    segment === ".." || segment === "." || segment === "" || segment.includes("\0") || segment.includes("\\");
+  if (segments.some((segment) => invalidSegment(segment))) {
+    // A path that the server's document path rules reject never names an epic.
+    return null;
+  }
+  if (segments[0] !== "sdlc" || segments[1] !== "epics") {
+    return null;
+  }
+  const epic = segments[2] ?? "";
+  return epic.length > 0 ? epic : null;
+}
+
+// The feature slug a feature document path names, or null when the path is not
+// a feature document; the slug is the file name without the `.md` suffix
+// (ticket 0052).
+export function featureSlugOf(path) {
+  const segments = pathSegments(String(path ?? ""));
+  const invalidSegment = (segment) =>
+    segment === ".." || segment === "." || segment === "" || segment.includes("\0") || segment.includes("\\");
+  if (segments.some((segment) => invalidSegment(segment))) {
+    // A path that the server's document path rules reject never names a feature.
+    return null;
+  }
+  if (segments[0] !== "sdlc" || segments[1] !== "features") {
+    return null;
+  }
+  const slug = (segments[2] ?? "").replace(/\.md$/, "");
+  return slug.length > 0 ? slug : null;
+}
