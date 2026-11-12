@@ -25,7 +25,8 @@ pub struct AppState {
     pub chat: Arc<ChatClient>,
     /// The in-memory proposal service that turns chat blocks into proposals.
     pub proposals: Arc<ProposalService>,
-    /// The event hub that publishes debounced file changes to SSE subscribers.
+    /// The event hub that publishes debounced file changes to SSE subscribers,
+    /// suppressing the writes the store performed itself (ticket 0055).
     pub events: Arc<EventHub>,
 }
 
@@ -49,7 +50,7 @@ impl AppState {
         };
 
         let proposals = Arc::new(ProposalService::new(store.clone()));
-        let events = Arc::new(EventHub::new());
+        let events = Arc::new(EventHub::with_recent_writes(store.recent_writes()));
 
         Ok(Self {
             config: Arc::new(config),

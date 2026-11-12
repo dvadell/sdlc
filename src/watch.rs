@@ -1,16 +1,21 @@
-//! File watcher and event hub (ticket 0054).
+//! File watcher and event hub (tickets 0054 and 0055).
 //!
 //! The watcher notices changes sdlc did not make itself and publishes one
 //! debounced event per document save into a broadcast hub. Every SSE subscriber
 //! drains the hub through [`EventHub::subscribe`]; a subscriber that falls behind
-//! gets a resync instead of a failure.
+//! gets a resync instead of a failure. Changes sdlc made itself are suppressed by
+//! comparing the content hash of the changed file with the write the store
+//! recorded, so a save from the app never notifies the browser (ticket 0055).
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use notify::{Error as NotifyError, RecursiveMode};
 use notify_debouncer_full::{DebounceEventResult, new_debouncer};
 use tokio::sync::broadcast;
+
+use crate::store::RecentWrites;
 
 /// The debounce window of the watcher: one editor save within it produces one
 /// event, and writes separated by more than the window produce two.
@@ -32,6 +37,9 @@ pub struct EventHub {
     sender: broadcast::Sender<FileChanged>,
     /// The number of events the hub keeps for a subscriber that lags behind.
     capacity: usize,
+    /// The recent writes the store performed, which the hub compares against
+    /// before publishing (ticket 0055).
+    recent: Arc<RecentWrites>,
 }
 
 impl EventHub {
@@ -45,6 +53,17 @@ impl EventHub {
         Self {
             sender: broadcast::Sender::new(capacity),
             capacity,
+            recent: Arc::new(RecentWrites::new()),
+        }
+    }
+
+    /// Creates a hub that compares the debounced events against the given
+    /// recent writes (ticket 0055).
+    pub fn with_recent_writes(recent_writes: Arc<RecentWrites>) -> Self {
+        Self {
+            sender: broadcast::Sender::new(EVENT_CAPACITY),
+            capacity: EVENT_CAPACITY,
+            recent: recent_writes,
         }
     }
 
@@ -69,6 +88,20 @@ impl EventHub {
         let _ = self.sender.send(FileChanged {
             path: path.to_string(),
         });
+    }
+
+    /// Decides whether the debounced change of one document must be published
+    /// (ticket 0055).
+    ///
+    /// The changed file is read back and hashed here, and the recorded write of
+    /// the path is compared against it: a hash that still matches the write the
+    /// store performed is the write sdlc itself made, so the event is suppressed
+    /// instead of notifying the browser about a save the app just did.
+    pub fn should_publish(&self, root: &Path, path: &str) -> bool {
+        let current_hash = std::fs::read(root.join(path))
+            .map(|bytes| crate::store::content_hash(&bytes))
+            .ok();
+        self.recent.should_publish(path, current_hash.as_deref())
     }
 
     /// Receives one file change, resyncing a lagging subscriber (ticket 0054).
@@ -106,7 +139,9 @@ impl Default for EventHub {
 /// The watcher uses the recommended backend of the platform with a 300 ms
 /// debounce and watches `root` recursively; events that do not name a validated
 /// document are dropped, including `target/`, `.git/` and temp files. The
-/// returned task holds the watcher open until the caller aborts it.
+/// returned task holds the watcher open until the caller aborts it. The
+/// debounced events are filtered against the hub's recent writes, so the
+/// writes the store performed itself are not published (ticket 0055).
 ///
 /// # Errors
 ///
@@ -150,7 +185,12 @@ fn handle_result(hub: &EventHub, root: &Path, result: DebounceEventResult) {
                         continue;
                     }
                     if let Some(path) = event_path(root, path) {
-                        hub.publish(&path);
+                        // The event is suppressed when the store recorded the write
+                        // that produced it and the file still holds that content
+                        // (ticket 0055).
+                        if hub.should_publish(root, &path) {
+                            hub.publish(&path);
+                        }
                     }
                 }
             }

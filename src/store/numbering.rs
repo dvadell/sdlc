@@ -82,6 +82,7 @@ impl DocStore {
         content_of: impl Fn(u32) -> String + Send + 'static,
     ) -> Result<DocPath, StoreError> {
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let root = self.root.clone();
 
         tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
@@ -106,8 +107,13 @@ impl DocStore {
                     .join("description.md");
                 let content = content_of(number);
 
-                match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
-                {
+                match crate::store::save_critical(
+                    &resolved,
+                    &path,
+                    &content,
+                    &Expectation::Missing,
+                    &recent_writes,
+                ) {
                     Ok(_) => return Ok(path),
                     Err(StoreError::AlreadyExists(_)) => {
                         last_error = Some(StoreError::AlreadyExists(format!(
@@ -181,6 +187,7 @@ impl DocStore {
         supersedes: Option<u32>,
     ) -> Result<(DocPath, Vec<String>), StoreError> {
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let root = self.root.clone();
 
         tokio::task::spawn_blocking(move || -> Result<(DocPath, Vec<String>), StoreError> {
@@ -230,7 +237,13 @@ impl DocStore {
                 };
                 let content =
                     crate::store::templates::decision_content(number, &title, status, supersedes);
-                match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
+                match crate::store::save_critical(
+                    &resolved,
+                    &path,
+                    &content,
+                    &Expectation::Missing,
+                    &recent_writes,
+                )
                 {
                     Ok(_) => {
                         // The dangling-target check runs after the file is
@@ -307,6 +320,7 @@ impl DocStore {
         content_of: impl Fn(u32) -> String + Send + 'static,
     ) -> Result<DocPath, StoreError> {
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let root = self.root.clone();
 
         tokio::task::spawn_blocking(move || -> Result<DocPath, StoreError> {
@@ -339,8 +353,13 @@ impl DocStore {
                     }
                 };
                 let content = content_of(number);
-                match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
-                {
+                match crate::store::save_critical(
+                    &resolved,
+                    &path,
+                    &content,
+                    &Expectation::Missing,
+                    &recent_writes,
+                ) {
                     Ok(_) => return Ok(path),
                     Err(StoreError::AlreadyExists(_)) => {
                         last_error = Some(StoreError::AlreadyExists(format!(

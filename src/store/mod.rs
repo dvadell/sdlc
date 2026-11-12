@@ -21,6 +21,7 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -29,6 +30,13 @@ use crate::store::index::{RewriteOutcome, rewrite};
 
 /// The project-relative path of the PRD the feature index is rendered into.
 const PRD_PATH: &str = "sdlc/PRD.md";
+
+/// How long a recorded self-write stays comparable before it expires (ticket 0055).
+const RECENT_WRITE_TTL: Duration = Duration::from_secs(5);
+
+/// The maximum number of recorded self-writes kept before the oldest is pruned
+/// (ticket 0055).
+const MAX_RECENT_WRITES: usize = 1024;
 
 /// Errors from the document store.
 ///
@@ -154,6 +162,150 @@ pub struct DeleteReport {
     pub orphaned_tickets: usize,
 }
 
+/// One write sdlc performed on a document, remembered until the watcher has
+/// compared the file against it (ticket 0055).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecentWrite {
+    /// The content hash the write produced; `None` marks a delete of a document
+    /// that no longer exists.
+    hash: Option<String>,
+    /// When the write was recorded; entries expire after the grace period.
+    inserted: Instant,
+}
+
+/// The recent writes of one store, behind a mutex (ticket 0055).
+///
+/// The store records every write it performs with the content hash that was
+/// written, plus an insert timestamp, so the file watcher can tell the changes
+/// sdlc made itself apart from external ones: a watcher event whose file still
+/// holds the recorded hash is suppressed, and a recorded delete whose file stays
+/// missing is suppressed as well. Entries expire after the grace period, so an
+/// external change arriving later is never mistaken for the write that just
+/// happened, and the map is bounded to [`MAX_RECENT_WRITES`] entries.
+#[derive(Debug)]
+pub struct RecentWrites {
+    ttl: Duration,
+    max: usize,
+    entries: std::sync::Mutex<std::collections::HashMap<String, RecentWrite>>,
+}
+
+impl Default for RecentWrites {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RecentWrites {
+    /// Creates a recent-writes map with the default grace period and bound (ticket 0055).
+    pub fn new() -> Self {
+        Self::with_limits(RECENT_WRITE_TTL, MAX_RECENT_WRITES)
+    }
+
+    /// Creates a recent-writes map whose entries expire after `ttl` and are
+    /// bounded to `max` entries (ticket 0055).
+    pub fn with_limits(ttl: Duration, max: usize) -> Self {
+        Self {
+            ttl,
+            max,
+            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Records the write of `path` with the content hash it produced (ticket 0055).
+    ///
+    /// The caller records before the write completes, because the content is
+    /// known before the write runs and the watcher event cannot arrive first.
+    pub fn record_write(&self, path: &str, hash: &str) {
+        self.record(path, Some(hash));
+    }
+
+    /// Records the delete of `path` (ticket 0055).
+    pub fn record_delete(&self, path: &str) {
+        self.record(path, None);
+    }
+
+    /// Decides whether a change of `path` must be published (ticket 0055).
+    ///
+    /// `current_hash` is the hash of the file as the watcher read it back; `None`
+    /// means the file did not read back, as after a delete. The recorded write
+    /// that still matches the file suppresses the event; a recorded delete whose
+    /// file stays missing suppresses it as well, and anything else is published.
+    pub fn should_publish(&self, path: &str, current_hash: Option<&str>) -> bool {
+        let mut entries = self.lock_entries();
+        let Some(entry) = entries.get(path).cloned() else {
+            // No write was recorded for the path, so the change is not ours.
+            return true;
+        };
+        if entry.inserted.elapsed() > self.ttl {
+            // The grace period elapsed, so the recorded write is stale context.
+            entries.remove(path);
+            return true;
+        }
+
+        let publish = match (&entry.hash, current_hash) {
+            // The file still holds the content the write produced, so the watcher
+            // heard sdlc's own write and the event is suppressed, not published.
+            (Some(recorded), Some(current)) => current != recorded.as_str(),
+            // The write deleted the document and nothing brought it back, so the
+            // delete is sdlc's own and stays suppressed.
+            (None, None) => false,
+            // Any other combination is an external change around our write.
+            _ => true,
+        };
+
+        if publish {
+            // The change is not the recorded write, so the write it belongs to is
+            // spent; forgetting it lets later external changes publish again.
+            entries.remove(path);
+        }
+
+        publish
+    }
+
+    /// The number of recent writes currently remembered (ticket 0055).
+    pub fn len(&self) -> usize {
+        self.lock_entries().len()
+    }
+
+    /// Whether no recent write is remembered (ticket 0055).
+    pub fn is_empty(&self) -> bool {
+        self.lock_entries().is_empty()
+    }
+
+    /// Locks the recent writes map, recovering a poisoned lock (ticket 0055).
+    fn lock_entries(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, RecentWrite>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Records one write or delete, pruning expired entries and bounding the
+    /// remembered writes (ticket 0055).
+    fn record(&self, path: &str, hash: Option<&str>) {
+        let mut entries = self.lock_entries();
+        entries.retain(|_, entry| entry.inserted.elapsed() <= self.ttl);
+        entries.insert(
+            path.to_string(),
+            RecentWrite {
+                hash: hash.map(str::to_string),
+                inserted: Instant::now(),
+            },
+        );
+        if entries.len() > self.max {
+            // Drop the oldest write, so the map cannot grow without bound.
+            let oldest = entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.inserted)
+                .map(|(path, _)| path.clone());
+            if let Some(oldest) = oldest {
+                entries.remove(&oldest);
+            }
+        }
+    }
+}
+
 /// The document store, rooted at one canonical project directory.
 #[derive(Debug, Clone)]
 pub struct DocStore {
@@ -164,6 +316,9 @@ pub struct DocStore {
     /// Invariant: a single store instance owns a single project root; create
     /// one [`DocStore`] per root and share the [`Arc`] across tasks.
     writes: std::sync::Arc<std::sync::Mutex<()>>,
+    /// The recent writes of this store, which the event hub consults to suppress
+    /// the events of the writes the store performs itself (ticket 0055).
+    recent_writes: std::sync::Arc<RecentWrites>,
 }
 
 impl DocStore {
@@ -176,7 +331,15 @@ impl DocStore {
         Ok(Self {
             root,
             writes: std::sync::Arc::new(std::sync::Mutex::new(())),
+            recent_writes: std::sync::Arc::new(RecentWrites::new()),
         })
+    }
+
+    /// The recent writes of this store, shared with the event hub that watches
+    /// it, so a watcher event can be told apart from the store's own writes
+    /// (ticket 0055).
+    pub fn recent_writes(&self) -> std::sync::Arc<RecentWrites> {
+        self.recent_writes.clone()
     }
 
     /// Resolves a validated document path to an absolute path inside the root.
@@ -281,6 +444,7 @@ impl DocStore {
         owned_expectation: Expectation,
     ) -> Result<String, StoreError> {
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
 
         tokio::task::spawn_blocking(move || -> Result<String, StoreError> {
             // The expectation check and the write are one critical section, so
@@ -291,7 +455,13 @@ impl DocStore {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-            save_critical(&resolved, &owned, &owned_content, &owned_expectation)
+            save_critical(
+                &resolved,
+                &owned,
+                &owned_content,
+                &owned_expectation,
+                &recent_writes,
+            )
         })
         .await
         .map_err(|err| StoreError::Io(io::Error::other(err)))?
@@ -333,6 +503,7 @@ impl DocStore {
         };
 
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let root = self.root.clone();
 
         tokio::task::spawn_blocking(move || -> Vec<String> {
@@ -391,7 +562,13 @@ impl DocStore {
             }
 
             let expectation = Expectation::Existing(document.hash);
-            let write_result = save_critical(&resolved, &owned_prd, &updated, &expectation);
+            let write_result = save_critical(
+                &resolved,
+                &owned_prd,
+                &updated,
+                &expectation,
+                &recent_writes,
+            );
             if let Err(error) = write_result {
                 tracing::warn!(error = %error, "the PRD feature index could not be written");
                 warnings.push(format!("the PRD feature index could not be written: {error}"));
@@ -501,6 +678,7 @@ impl DocStore {
     /// an existing feature through the missing-expectation write.
     async fn create_feature(&self, slug: &str, content: &str) -> Result<DocPath, StoreError> {
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let root = self.root.clone();
         let slug = slug.to_string();
         let content = content.to_string();
@@ -528,7 +706,13 @@ impl DocStore {
                 }
             };
 
-            crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)?;
+            crate::store::save_critical(
+                &resolved,
+                &path,
+                &content,
+                &Expectation::Missing,
+                &recent_writes,
+            )?;
             Ok(path)
         })
         .await
@@ -605,6 +789,7 @@ impl DocStore {
         let target = self.resolve_destination(to).await?;
 
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let owned_from = from.clone();
         let owned_to = to.clone();
 
@@ -612,7 +797,7 @@ impl DocStore {
             let _guard = writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            rename_resolved(&owned_from, &owned_to, &source, &target)
+            rename_resolved(&owned_from, &owned_to, &source, &target, &recent_writes)
         })
         .await
         .map_err(|err| StoreError::Io(io::Error::other(err)))?
@@ -634,6 +819,7 @@ impl DocStore {
         let resolved = self.resolve(path, ResolveMode::Existing).await?;
 
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let root = self.root.clone();
         let owned = path.clone();
 
@@ -641,7 +827,7 @@ impl DocStore {
             let _guard = writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            delete_resolved(&root, &owned, &resolved)
+            delete_resolved(&root, &owned, &resolved, &recent_writes)
         })
         .await
         .map_err(|err| StoreError::Io(io::Error::other(err)))?
@@ -683,6 +869,7 @@ fn rename_resolved(
     to: &DocPath,
     source: &Path,
     target: &Path,
+    recent: &RecentWrites,
 ) -> Result<DocPath, StoreError> {
     let from_kind = layout::kind(from.as_path()).ok_or_else(|| not_allowed(from.as_path()))?;
     let to_kind = layout::kind(to.as_path()).ok_or_else(|| not_allowed(to.as_path()))?;
@@ -720,7 +907,13 @@ fn rename_resolved(
                     to.as_path().display().to_string(),
                 ));
             }
+            let moved_hash = content_hash(&std::fs::read(source)?);
             std::fs::rename(from_dir, target)?;
+            // The rename moves the content, so the destination is a write of the
+            // same content and the source a delete; both are remembered, so the
+            // watcher suppresses the events of the move itself (ticket 0055).
+            recent.record_delete(&from.as_path().to_string_lossy());
+            recent.record_write(&to.as_path().to_string_lossy(), &moved_hash);
             Ok(to.clone())
         }
         DocKind::Ticket => {
@@ -739,7 +932,13 @@ fn rename_resolved(
                     to.as_path().display().to_string(),
                 ));
             }
+            let moved_hash = content_hash(&std::fs::read(source)?);
             std::fs::rename(source, target)?;
+            // The rename moves the content, so the destination is a write of the
+            // same content and the source a delete; both are remembered, so the
+            // watcher suppresses the events of the move itself (ticket 0055).
+            recent.record_delete(&from.as_path().to_string_lossy());
+            recent.record_write(&to.as_path().to_string_lossy(), &moved_hash);
             Ok(to.clone())
         }
         DocKind::Feature | DocKind::Decision => {
@@ -748,7 +947,13 @@ fn rename_resolved(
                     to.as_path().display().to_string(),
                 ));
             }
+            let moved_hash = content_hash(&std::fs::read(source)?);
             std::fs::rename(source, target)?;
+            // The rename moves the content, so the destination is a write of the
+            // same content and the source a delete; both are remembered, so the
+            // watcher suppresses the events of the move itself (ticket 0055).
+            recent.record_delete(&from.as_path().to_string_lossy());
+            recent.record_write(&to.as_path().to_string_lossy(), &moved_hash);
             Ok(to.clone())
         }
     }
@@ -759,6 +964,7 @@ fn delete_resolved(
     root: &Path,
     path: &DocPath,
     resolved: &Path,
+    recent: &RecentWrites,
 ) -> Result<DeleteReport, StoreError> {
     let kind = layout::kind(path.as_path()).ok_or_else(|| not_allowed(path.as_path()))?;
 
@@ -772,6 +978,7 @@ fn delete_resolved(
                 return Err(StoreError::EpicHasTickets { tickets });
             }
             std::fs::remove_dir_all(epic_dir)?;
+            recent.record_delete(&path.as_path().to_string_lossy());
             Ok(DeleteReport {
                 orphaned_tickets: 0,
             })
@@ -780,12 +987,14 @@ fn delete_resolved(
             let feature = layout::document_name(path.as_path()).unwrap_or_default();
             let orphaned = orphaned_tickets(root, feature);
             std::fs::remove_file(resolved)?;
+            recent.record_delete(&path.as_path().to_string_lossy());
             Ok(DeleteReport {
                 orphaned_tickets: orphaned,
             })
         }
         DocKind::Decision | DocKind::Ticket => {
             std::fs::remove_file(resolved)?;
+            recent.record_delete(&path.as_path().to_string_lossy());
             Ok(DeleteReport {
                 orphaned_tickets: 0,
             })
@@ -882,6 +1091,7 @@ fn save_critical(
     owned: &DocPath,
     owned_content: &str,
     owned_expectation: &Expectation,
+    recent: &RecentWrites,
 ) -> Result<String, StoreError> {
     let new_hash = content_hash(owned_content.as_bytes());
 
@@ -896,6 +1106,10 @@ fn save_critical(
             if current_hash != hash.as_str() {
                 return Err(StoreError::Conflict { current_hash });
             }
+            // The content is known before the write runs, so the hash is
+            // recorded before the write completes and the watcher event cannot
+            // arrive first (ticket 0055).
+            recent.record_write(&owned.as_path().to_string_lossy(), &new_hash);
             write_atomic(resolved, owned_content.as_bytes())?;
         }
         Expectation::Missing => {
@@ -904,6 +1118,7 @@ fn save_critical(
                     owned.as_path().display().to_string(),
                 ));
             }
+            recent.record_write(&owned.as_path().to_string_lossy(), &new_hash);
             write_atomic(resolved, owned_content.as_bytes())?;
         }
     }
@@ -2339,5 +2554,145 @@ mod tests {
 
         assert_eq!(report.orphaned_tickets, 0);
         assert!(!dir.path().join("sdlc/decisions/0001-use-axum.md").exists());
+    }
+    #[test]
+    fn recent_writes_suppress_their_own_write_and_publish_a_changed_hash() {
+        let recent = RecentWrites::new();
+
+        assert!(
+            recent.should_publish("sdlc/PRD.md", None),
+            "without a recorded write every change is published"
+        );
+
+        recent.record_write("sdlc/PRD.md", &content_hash(b"# Fresh\n"));
+        assert!(
+            !recent.should_publish("sdlc/PRD.md", Some(content_hash(b"# Fresh\n").as_str())),
+            "the write the store performed is suppressed"
+        );
+        assert!(
+            recent.should_publish("sdlc/PRD.md", Some(content_hash(b"# External\n").as_str())),
+            "an external change of the same path is published"
+        );
+    }
+
+    #[test]
+    fn a_recorded_write_of_the_same_hash_twice_is_still_suppressed_once() {
+        let recent = RecentWrites::new();
+        let hash = content_hash(b"# Fresh\n");
+
+        recent.record_write("sdlc/PRD.md", &hash);
+        recent.record_write("sdlc/PRD.md", &hash);
+
+        assert!(
+            !recent.should_publish("sdlc/PRD.md", Some(hash.as_str())),
+            "the repeated write of the same content is still sdlc's own write"
+        );
+    }
+
+    #[test]
+    fn a_recorded_delete_is_suppressed_while_the_document_is_missing() {
+        let recent = RecentWrites::new();
+
+        recent.record_delete("sdlc/PRD.md");
+        assert!(
+            !recent.should_publish("sdlc/PRD.md", None),
+            "the delete the store performed is suppressed"
+        );
+
+        recent.record_write("sdlc/PRD.md", &content_hash(b"# Fresh\n"));
+        assert!(
+            !recent.should_publish("sdlc/PRD.md", Some(content_hash(b"# Fresh\n").as_str())),
+            "a write recorded after the delete is published"
+        );
+    }
+
+    #[test]
+    fn recent_writes_expire_after_the_grace_period() {
+        let recent = RecentWrites::with_limits(Duration::from_millis(20), MAX_RECENT_WRITES);
+        let hash = content_hash(b"# Fresh\n");
+
+        recent.record_write("sdlc/PRD.md", &hash);
+        assert!(
+            !recent.should_publish("sdlc/PRD.md", Some(hash.as_str())),
+            "the recorded write is still comparable before it expires"
+        );
+
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            recent.should_publish("sdlc/PRD.md", Some(hash.as_str())),
+            "an expired recorded write must not suppress an external change"
+        );
+    }
+
+    #[test]
+    fn recent_writes_prune_expired_entries_and_stay_bounded() {
+        let recent = RecentWrites::with_limits(Duration::from_millis(20), 2);
+
+        recent.record_write("sdlc/a.md", "hash-a");
+        recent.record_write("sdlc/b.md", "hash-b");
+        std::thread::sleep(Duration::from_millis(40));
+        recent.record_write("sdlc/c.md", "hash-c");
+
+        assert_eq!(
+            recent.len(),
+            1,
+            "expired entries are pruned on insert and the map stays bounded"
+        );
+        assert!(
+            recent.should_publish("sdlc/a.md", Some("hash-a")),
+            "a pruned path is published again"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_store_records_writes_so_the_watcher_can_suppress_them() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc")).expect("sdlc dir");
+        std::fs::write(dir.path().join("sdlc/PRD.md"), "# PRD\n").expect("write prd");
+        let expectation = Expectation::Existing(content_hash(b"# PRD\n"));
+
+        let new_hash = store
+            .write(&prd_path(), "# Fresh\n", &expectation)
+            .await
+            .expect("the write should succeed");
+
+        let recent = store.recent_writes();
+        assert!(
+            !recent.should_publish("sdlc/PRD.md", Some(new_hash.as_str())),
+            "the save the store just performed is its own write and is suppressed"
+        );
+        assert!(
+            recent.should_publish("sdlc/PRD.md", Some(content_hash(b"# External\n").as_str())),
+            "an external change of the saved document is still published"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_store_records_a_delete_so_the_watcher_can_suppress_it() {
+        let (dir, store) = store_in_temp().await;
+        std::fs::create_dir_all(dir.path().join("sdlc/features")).expect("features dir");
+        std::fs::write(
+            dir.path().join("sdlc/features/export.md"),
+            "---\nstatus: planned\n---\n\n# Export\n",
+        )
+        .expect("write the feature");
+        let path = DocPath::parse("sdlc/features/export.md").expect("valid path");
+        let expectation =
+            Expectation::Existing(content_hash(b"---\nstatus: planned\n---\n\n# Export\n"));
+
+        store
+            .write(&path, "# Fresh\n", &expectation)
+            .await
+            .expect("the write should succeed");
+        store
+            .delete(&path)
+            .await
+            .expect("the delete should succeed");
+
+        let recent = store.recent_writes();
+        assert!(
+            !recent.should_publish("sdlc/features/export.md", None),
+            "the delete the store just performed is its own write and is suppressed"
+        );
     }
 }

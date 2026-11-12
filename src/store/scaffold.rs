@@ -31,6 +31,7 @@ impl DocStore {
     /// fake document, so an empty project never gains a fabricated epic.
     pub async fn scaffold(&self) -> Result<ScaffoldReport, StoreError> {
         let writes = self.writes.clone();
+        let recent_writes = self.recent_writes.clone();
         let root = self.root.clone();
         let files = starter_files();
 
@@ -45,8 +46,13 @@ impl DocStore {
                     DocPath::parse(raw).map_err(|_| StoreError::NotAllowed(raw.to_string()))?;
                 let resolved = resolve_scaffold_path(&root, &path)?;
 
-                match crate::store::save_critical(&resolved, &path, &content, &Expectation::Missing)
-                {
+                match crate::store::save_critical(
+                    &resolved,
+                    &path,
+                    &content,
+                    &Expectation::Missing,
+                    &recent_writes,
+                ) {
                     Ok(_) => report.created.push(raw.to_string()),
                     Err(StoreError::AlreadyExists(_)) => report.skipped.push(raw.to_string()),
                     Err(error) => return Err(error),
