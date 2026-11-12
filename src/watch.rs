@@ -71,12 +71,14 @@ impl EventHub {
         });
     }
 
-    /// Receives the next file change, resyncing a lagging subscriber (ticket 0054).
+    /// Receives one file change, resyncing a lagging subscriber (ticket 0054).
     ///
     /// A subscriber that falls behind receives [`broadcast::error::RecvError::Lagged`]
     /// instead of a failure; it resubscribes from the current tail and keeps
-    /// receiving, so a slow or reconnecting client never breaks the stream.
-    pub async fn next(&self) -> Option<FileChanged> {
+    /// receiving, so a slow or reconnecting client never breaks the stream. Each
+    /// call opens a fresh subscription, so it receives one event and not a
+    /// continuous stream.
+    pub async fn receive_once(&self) -> Option<FileChanged> {
         let mut receiver = self.subscribe();
 
         loop {
@@ -179,7 +181,10 @@ fn document_path(raw: &str) -> Option<String> {
 /// two paths, and each of them is checked (ticket 0054).
 fn event_path(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
-    let raw = relative.to_string_lossy().into_owned();
+    // The slash form is what the document path validation expects, so a
+    // platform that separates paths with a backslash does not lose every event
+    // to the rejection of the backslash (ticket 0054).
+    let raw = relative.to_string_lossy().into_owned().replace('\\', "/");
 
     document_path(&raw)
 }

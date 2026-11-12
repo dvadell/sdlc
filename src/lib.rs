@@ -115,17 +115,21 @@ pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, 
         let _ = tokio::signal::ctrl_c().await;
     };
 
-    axum::serve(listener, router(state))
+    let served = axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown)
         .await
         .map_err(|source| ServerError::Io {
             port: configured_port,
             source,
-        })?;
+        });
 
+    // The watcher task is stopped on every exit path of the serve future,
+    // including a failed serve, before the outcome is returned.
     if let Some(watcher) = watcher {
         watcher.abort();
     }
+
+    served?;
 
     Ok(addr)
 }

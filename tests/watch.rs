@@ -115,6 +115,10 @@ async fn writes_outside_the_document_layout_are_ignored() {
     write(&dir, "Cargo.toml", "[package]\n");
     write(&dir, "target/debug/sdlc", "binary");
 
+    // Wait past the debounce window so the watcher has flushed its batch before
+    // the empty queue is read as a filtered result.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
     assert!(
         matches!(receiver.try_recv(), Err(TryRecvError::Empty)),
         "non-document files and target/ must not emit events"
