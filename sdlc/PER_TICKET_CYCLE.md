@@ -57,4 +57,9 @@
   change; the old invariant ("the caller records before the write completes") then
   silently describes a path that no longer exists.
 
+- The browser delivers an `EventSource` message event's data as the raw JSON
+  string of the frame, so a `file-changed` handler must `JSON.parse` the data before
+  reading fields; test doubles must inject the string form, or the suite exercises a
+  shape that never occurs in the browser.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
