@@ -290,6 +290,27 @@ test("a configured panel with an open document shows the AI host and the privacy
   assert.equal(noDoc.hidden, true);
 });
 
+test("the configured privacy notice links to the README privacy section", () => {
+  noticeElement.replaceChildren();
+  renderChat();
+
+  const links = noticeElement.children.filter((child) => child.tagName === "a");
+  assert.equal(links.length, 1);
+  assert.equal(links[0].href, "#privacy");
+  assert.equal(links[0].textContent, "Read the privacy section of the README");
+});
+
+test("the unconfigured privacy notice carries no README link", () => {
+  noticeElement.replaceChildren();
+  state.config = { project_name: "sdlc", port: 9000, ai_configured: false, model: null, ai_host: null };
+  state.current = { path: null, content: "", savedContent: "", hash: null };
+  state.chat = { messages: [], streaming: false, attachments: [] };
+
+  renderChat();
+
+  assert.deepEqual(noticeElement.children, []);
+});
+
 test("the send control is disabled while the composer is empty", () => {
   renderChat();
 

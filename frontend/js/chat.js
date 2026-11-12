@@ -149,7 +149,7 @@ function canSend() {
 
 // The one-line notice of the panel: document content is sent to the configured
 // AI host, and the host itself comes from `GET /api/config` (never the full base
-// URL, so credentials never reach the page).
+// URL, so credentials never reach the page) (tickets 0038 and 0058).
 function renderNotice() {
   const host = document.querySelector("#chat-ai-host");
   const notice = document.querySelector("#chat-notice");
@@ -162,7 +162,22 @@ function renderNotice() {
     notice.textContent = configured
       ? `Document content is sent to ${aiHost ?? "the configured host"}.`
       : "AI chat is not configured. Set SDLC_AI_BASE_URL and SDLC_AI_MODEL, optionally SDLC_AI_API_KEY, then restart sdlc.";
+    if (configured) {
+      // The first-run privacy notice links to the README section; the anchor is
+      // the stable heading id of the Privacy section, so the link works both in
+      // the rendered README and as a same-page reference here (ticket 0058).
+      notice.appendChild(renderPrivacyLink());
+    }
   }
+}
+
+// The link of the privacy notice to the Privacy section of the README; the host
+// itself is never repeated here, only the section that explains the data flow.
+function renderPrivacyLink() {
+  const link = document.createElement("a");
+  link.href = "#privacy";
+  link.textContent = "Read the privacy section of the README";
+  return link;
 }
 
 // The attach control of the panel: the chips of the open and the attached
