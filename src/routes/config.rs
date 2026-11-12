@@ -28,6 +28,9 @@ pub struct ConfigResponse {
     ai_host: Option<String>,
     /// Crate version.
     version: &'static str,
+    /// The maximum PRD size in bytes before a size warning is issued (ticket
+    /// 0057); the default is 12000 and the override is capped at 1000000.
+    prd_max_bytes: u64,
 }
 
 impl ConfigResponse {
@@ -42,6 +45,7 @@ impl ConfigResponse {
             model: ai.map(|ai| ai.model().to_owned()),
             ai_host: ai.and_then(|ai| ai_host(ai.base_url())),
             version: env!("CARGO_PKG_VERSION"),
+            prd_max_bytes: state.config.prd_max_bytes(),
         }
     }
 }

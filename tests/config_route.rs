@@ -178,6 +178,26 @@ async fn port_zero_reports_the_actual_bound_port() {
 }
 
 #[tokio::test]
+async fn config_exposes_the_prd_max_bytes_default_and_override() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(test_config(dir.path(), &[])).await;
+
+    let (_, json) = get_config_json(server.addr).await;
+
+    assert_eq!(json["prd_max_bytes"].as_u64(), Some(12000));
+}
+
+#[tokio::test]
+async fn config_exposes_the_prd_max_bytes_env_override() {
+    let dir = TempDir::new().expect("temp project");
+    let server = TestServer::start(test_config(dir.path(), &[("SDLC_PRD_MAX_BYTES", "5")])).await;
+
+    let (_, json) = get_config_json(server.addr).await;
+
+    assert_eq!(json["prd_max_bytes"].as_u64(), Some(5));
+}
+
+#[tokio::test]
 async fn unknown_api_route_still_returns_the_json_404_shape() {
     let dir = TempDir::new().expect("temp project");
     let server = TestServer::start(test_config(dir.path(), &[])).await;

@@ -271,6 +271,7 @@ Environment variables:
 | `SDLC_AI_BASE_URL` | for chat | Base URL ending before `/chat/completions`, for example `https://api.openai.com/v1` or `http://localhost:11434/v1` |
 | `SDLC_AI_MODEL` | for chat | Model name sent in each request |
 | `SDLC_AI_API_KEY` | no | Sent as a bearer token when set |
+| `SDLC_PRD_MAX_BYTES` | no | Maximum PRD size in bytes before a size warning; default 12000, upper bound 1000000 |
 
 Print the listening URL and whether the AI is configured at startup, never the key.
 

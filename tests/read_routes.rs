@@ -327,6 +327,53 @@ async fn read_returns_exact_content_and_the_current_hash() {
 }
 
 #[tokio::test]
+async fn the_prd_doc_response_carries_the_advisory_warnings() {
+    let dir = TempDir::new().expect("temp project");
+    let content = format!(
+        "# Product requirements\n\n## Overview\n\n## Dependencies\n\n```rust\nfn main() {}\n```\n\n",
+        "x".repeat(12_000)
+    );
+    write(&dir, "sdlc/PRD.md", content.as_bytes());
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server.get("/api/docs/sdlc/PRD.md").await;
+
+    assert_eq!(response.status, 200);
+    let json = response.json();
+    let warnings = json["warnings"]
+        .as_array()
+        .expect("the doc response should carry a warnings array");
+    // The oversized PRD warns about its size, about its single fenced code block
+    // and about the stack heading that names content of another document (ticket
+    // 0057).
+    assert_eq!(warnings.len(), 3);
+    assert_eq!(warnings[0]["kind"], "prd_size");
+    assert_eq!(
+        warnings[0]["bytes"].as_u64(),
+        Some(content.len() as u64),
+        "the size warning must carry the byte length of the content"
+    );
+    assert_eq!(warnings[0]["limit"].as_u64(), Some(12000));
+    assert_eq!(warnings[1]["kind"], "code_block");
+    assert_eq!(warnings[1]["count"].as_u64(), Some(1));
+    assert_eq!(warnings[2]["kind"], "stack_heading");
+    assert_eq!(warnings[2]["heading"].as_str(), Some("Dependencies"));
+}
+
+#[tokio::test]
+async fn the_doc_response_of_a_non_prd_document_has_no_warnings() {
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/architecture.md", b"# Architecture\n");
+    let server = TestServer::start(dir.path()).await;
+
+    let response = server.get("/api/docs/sdlc/architecture.md").await;
+
+    assert_eq!(response.status, 200);
+    let json = response.json();
+    assert_eq!(json["warnings"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn reading_again_after_an_external_write_returns_the_new_hash() {
     let dir = TempDir::new().expect("temp project");
     write(&dir, "sdlc/PRD.md", b"# First\n");

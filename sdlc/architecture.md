@@ -53,6 +53,7 @@ Chat service ──HTTPS──► OpenAI-compatible API (configured by env vars)
 | AI base URL | `SDLC_AI_BASE_URL` | none (chat disabled if unset) |
 | AI API key | `SDLC_AI_API_KEY` | none (optional, local servers often need none) |
 | AI model | `SDLC_AI_MODEL` | none (chat disabled if unset) |
+| PRD max bytes | `SDLC_PRD_MAX_BYTES` | `12000` |
 
 - The listen address is always `127.0.0.1`; there is deliberately no flag to change it.
 - Configuration is parsed once at startup into an immutable `Config` held in shared state.

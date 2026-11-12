@@ -358,6 +358,32 @@ async fn an_oversized_body_returns_413_with_the_error_shape() {
 }
 
 #[tokio::test]
+async fn an_over_limit_prd_save_still_succeeds() {
+    let dir = TempDir::new().expect("temp project");
+    write(&dir, "sdlc/PRD.md", b"# Keep\n");
+    let server = TestServer::start(dir.path()).await;
+
+    let read = server.get("/api/docs/sdlc/PRD.md").await.json();
+    let old_hash = read["hash"].as_str().expect("the read hash").to_string();
+    let content = format!("{}\n", "x".repeat(12_000));
+
+    // The warnings are advisory and never block a save, so a document that grew
+    // past the PRD size limit still saves (ticket 0057).
+    let response = server
+        .put(
+            "/api/docs/sdlc/PRD.md",
+            &json!({ "content": content, "expected_hash": old_hash }).to_string(),
+        )
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        fs::read(dir.path().join("sdlc/PRD.md")).expect("read the file"),
+        content.as_bytes()
+    );
+}
+
+#[tokio::test]
 async fn a_non_json_content_type_returns_415_from_the_guard() {
     let dir = TempDir::new().expect("temp project");
     write(&dir, "sdlc/PRD.md", b"# Keep\n");

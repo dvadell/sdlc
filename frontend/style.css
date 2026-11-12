@@ -959,6 +959,42 @@ body {
   color: #6b5310;
 }
 
+/* The PRD warnings banner of the editor (ticket 0057): a dismissible, non-modal
+   advisory banner above the editor toolbar, so the person keeps the local text
+   and keeps typing while the notice is up; warnings never block a save. The
+   dismissal is session-only, so a reload makes the banner reappear.
+   The messages stack, and the dismiss action sits beside them. */
+.prd-warnings {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: #fdf6e3;
+  border-bottom: 1px solid #ecd9a0;
+  color: #6b5310;
+  font-size: 0.9rem;
+}
+
+.prd-warnings[hidden] {
+  display: none;
+}
+
+.prd-warnings-message {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.prd-warnings button {
+  margin-left: 0.75rem;
+  padding: 0.1rem 0.6rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
 .proposal-warning {
   margin: 0;
   font-size: 0.9rem;

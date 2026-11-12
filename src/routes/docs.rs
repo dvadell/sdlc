@@ -53,6 +53,35 @@ struct DocEntryResponse {
     feature_orphaned: bool,
 }
 
+/// One advisory warning about the PRD (ticket 0057): the PRD grew past the
+/// configured size limit, it carries a fenced code block, or a heading names
+/// content that belongs in the architecture, conventions or a feature spec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum PrdWarning {
+    /// The PRD content is larger than the configured size limit (ticket 0057).
+    #[serde(rename = "prd_size")]
+    Size {
+        /// The byte length of the PRD content.
+        bytes: u64,
+        /// The configured maximum size in bytes.
+        limit: u64,
+    },
+    /// The PRD content carries at least one fenced code block (ticket 0057).
+    #[serde(rename = "code_block")]
+    CodeBlock {
+        /// How many fenced code blocks the PRD content carries.
+        count: usize,
+    },
+    /// A PRD heading names content that belongs in another document (ticket
+    /// 0057).
+    #[serde(rename = "stack_heading")]
+    StackHeading {
+        /// The heading text that matched.
+        heading: String,
+    },
+}
+
 /// A document's content and current content hash.
 #[derive(Debug, Serialize)]
 struct DocResponse {
@@ -62,6 +91,131 @@ struct DocResponse {
     content: String,
     /// Lowercase hex SHA-256 of the content bytes.
     hash: String,
+    /// The advisory warnings of the PRD (ticket 0057); empty for every other
+    /// document, because only the PRD carries them.
+    warnings: Vec<PrdWarning>,
+}
+
+impl DocResponse {
+    /// Builds the read response of one document with its advisory warnings.
+    fn from_document(document: Document, limit: u64) -> Self {
+        let warnings = document_warnings(&document, limit);
+        Self {
+            path: document.path.as_path().to_string_lossy().into_owned(),
+            content: document.content,
+            hash: document.hash,
+            warnings,
+        }
+    }
+}
+
+/// The advisory warnings of a document read (ticket 0057): only the PRD carries
+/// them, and only while its content trips the size limit or the content
+/// heuristics; every other document answers with an empty list.
+fn document_warnings(document: &Document, limit: u64) -> Vec<PrdWarning> {
+    if document.path.as_path() != std::path::Path::new("sdlc/PRD.md") {
+        // The size and content warnings belong to the PRD alone (ticket 0057).
+        return Vec::new();
+    }
+    prd_warnings(&document.content, limit)
+}
+
+/// The advisory warnings of the PRD content (ticket 0057).
+///
+/// The warnings are advisory only: the caller never turns them into a failure,
+/// so an over-limit PRD can still be saved (ticket 0057).
+pub(crate) fn prd_warnings(content: &str, limit: u64) -> Vec<PrdWarning> {
+    let mut warnings = Vec::new();
+    let bytes = content.len() as u64;
+    if bytes > limit {
+        warnings.push(PrdWarning::Size { bytes, limit });
+    }
+    let code_blocks = fenced_code_block_count(content);
+    if code_blocks > 0 {
+        warnings.push(PrdWarning::CodeBlock { count: code_blocks });
+    }
+    for heading in stack_headings(content) {
+        warnings.push(PrdWarning::StackHeading { heading });
+    }
+    warnings
+}
+
+/// Counts the fenced code blocks of a markdown content (ticket 0057).
+///
+/// Paired, unpaired and indented fences all count; the open state of a fence is
+/// tracked, so a closing marker never opens another block and the marker lines of
+/// a block are never read as headings.
+fn fenced_code_block_count(content: &str) -> usize {
+    let mut count = 0;
+    let mut open = false;
+    for line in content.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if is_fence_line(line) {
+            if open {
+                open = false;
+            } else {
+                open = true;
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Whether a markdown line opens or closes a fenced code block (ticket 0057).
+fn is_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+/// The headings of a markdown content whose text contains a stack-ish token,
+/// in document order, with the heading text (ticket 0057).
+fn stack_headings(content: &str) -> Vec<String> {
+    const STACK_TOKENS: [&str; 5] = [
+        "dependencies",
+        "libraries",
+        "stack",
+        "tooling",
+        "code style",
+    ];
+    let mut headings = Vec::new();
+    let mut open = false;
+    for line in content.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if is_fence_line(line) {
+            // A fence marker is never a heading, whatever it contains (ticket 0057).
+            open = !open;
+            continue;
+        }
+        if open {
+            continue;
+        }
+        if let Some(heading) = atx_heading_text(line) {
+            let lower = heading.to_lowercase();
+            if STACK_TOKENS.iter().any(|token| lower.contains(*token)) {
+                headings.push(heading);
+            }
+        }
+    }
+    headings
+}
+
+/// The text of an ATX heading line, without its markers (ticket 0057).
+fn atx_heading_text(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let text = trimmed[hashes..]
+        .trim()
+        .trim_end_matches('#')
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
 }
 
 /// The body of a save request.
@@ -196,16 +350,6 @@ impl From<DocEntry> for DocEntryResponse {
     }
 }
 
-impl From<Document> for DocResponse {
-    fn from(document: Document) -> Self {
-        Self {
-            path: document.path.as_path().to_string_lossy().into_owned(),
-            content: document.content,
-            hash: document.hash,
-        }
-    }
-}
-
 /// The stable JSON name of a document kind.
 fn kind_name(kind: DocKind) -> &'static str {
     match kind {
@@ -230,7 +374,10 @@ pub async fn get_doc(
     let path = parse_captured_path(&raw)?;
     let document = state.store.read(&path).await?;
 
-    Ok(no_store(Json(DocResponse::from(document))))
+    Ok(no_store(Json(DocResponse::from_document(
+        document,
+        state.config.prd_max_bytes(),
+    ))))
 }
 
 /// Handles `PUT /api/docs/{*path}`.
@@ -676,6 +823,151 @@ mod tests {
                 .await
                 .is_none(),
             "a rename without a feature must not refresh the index"
+        );
+    }
+
+    // The PRD warnings of the document response (ticket 0057).
+
+    #[test]
+    fn prd_warnings_are_empty_at_and_below_the_limit() {
+        let content = "# Product requirements\n";
+        assert!(prd_warnings(content, 12000).is_empty());
+
+        // The limit itself does not warn; only a strictly larger content does
+        // (ticket 0057).
+        let at_limit = "x".repeat(10);
+        assert!(prd_warnings(&at_limit, 10).is_empty());
+
+        let over_limit = format!("{at_limit}x");
+        let warnings = prd_warnings(&over_limit, 10);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            PrdWarning::Size {
+                bytes: over_limit.len() as u64,
+                limit: 10
+            }
+        );
+    }
+
+    #[test]
+    fn prd_size_warning_counts_bytes_not_chars() {
+        // A multi-byte heading is longer in bytes than in characters, so the size
+        // warning must measure bytes and not characters (ticket 0057).
+        let content = format!("# Product requirements\n\n## {}\n", "é".repeat(30));
+        let bytes = content.len() as u64;
+        let char_count = content.chars().count() as u64;
+        assert!(bytes > char_count, "the fixture must be multi-byte");
+
+        let warnings = prd_warnings(&content, char_count);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            PrdWarning::Size {
+                bytes,
+                limit: char_count
+            }
+        );
+    }
+
+    #[test]
+    fn prd_warnings_count_fenced_code_blocks_and_not_inline_code() {
+        let clean = "# Product requirements\n\nSome `inline code`.\n";
+        assert!(prd_warnings(clean, 12000).is_empty());
+
+        let paired = "# PRD\n\n```rust\nfn main() {}\n```\n";
+        assert_eq!(prd_warnings(paired, 12000).len(), 1);
+        assert_eq!(
+            prd_warnings(paired, 12000)[0],
+            PrdWarning::CodeBlock { count: 1 }
+        );
+
+        let indented = "# PRD\n\n  ```rust\n  fn main() {}\n  ```\n";
+        assert_eq!(
+            prd_warnings(indented, 12000)[0],
+            PrdWarning::CodeBlock { count: 1 }
+        );
+
+        let unpaired = "# PRD\n\n```rust\nfn main() {}\n";
+        assert_eq!(
+            prd_warnings(unpaired, 12000)[0],
+            PrdWarning::CodeBlock { count: 1 }
+        );
+
+        let multiple = "# PRD\n\n```rust\na\n```\n\ntext\n\n```bash\nb\n```\n";
+        assert_eq!(
+            prd_warnings(multiple, 12000)[0],
+            PrdWarning::CodeBlock { count: 2 }
+        );
+    }
+
+    #[test]
+    fn prd_warnings_match_stack_headings_case_insensitively() {
+        let content = "# Product requirements\n\n## Dependencies\n\nBody.\n";
+        let warnings = prd_warnings(content, 12000);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0],
+            PrdWarning::StackHeading {
+                heading: "Dependencies".to_string()
+            }
+        );
+
+        let stacked = "# Product requirements\n\n## STACK\n";
+        let warnings = prd_warnings(stacked, 12000);
+        assert_eq!(
+            warnings[0],
+            PrdWarning::StackHeading {
+                heading: "STACK".to_string()
+            }
+        );
+
+        let tooling = "# Product requirements\n\n### libraries and tooling\n";
+        let warnings = prd_warnings(tooling, 12000);
+        assert_eq!(
+            warnings[0],
+            PrdWarning::StackHeading {
+                heading: "libraries and tooling".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn prd_warnings_ignore_headings_inside_code_fences() {
+        let content = "# Product requirements\n\n```\n## Stack\n```\n\n## Overview\n";
+        // The fenced block itself warns, but the heading inside the fence does
+        // not (ticket 0057).
+        let warnings = prd_warnings(content, 12000);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0], PrdWarning::CodeBlock { count: 1 });
+    }
+
+    #[test]
+    fn document_warnings_are_computed_for_the_prd_only() {
+        let prd = Document {
+            path: DocPath::parse("sdlc/PRD.md").expect("valid PRD"),
+            content: "x".repeat(20_000),
+            hash: "abc".to_string(),
+        };
+        let architecture = Document {
+            path: DocPath::parse("sdlc/architecture.md").expect("valid architecture"),
+            content: "x".repeat(20_000),
+            hash: "abc".to_string(),
+        };
+
+        let prd_warnings = document_warnings(&prd, 10);
+        assert_eq!(prd_warnings.len(), 1);
+        assert_eq!(
+            prd_warnings[0],
+            PrdWarning::Size {
+                bytes: 20_000,
+                limit: 10
+            }
+        );
+
+        assert!(
+            document_warnings(&architecture, 10).is_empty(),
+            "the warnings belong to the PRD only (ticket 0057)"
         );
     }
 }

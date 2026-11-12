@@ -2,7 +2,8 @@
 //! and 0024), plus the save conflict banner (ticket 0027) and the status control
 //! of features, epics, decisions and tickets (tickets 0030, 0032 and 0052), and
 //! the read-only supersedes line of decisions (ticket 0032) and the read-only
-//! epic and optional feature links of tickets (ticket 0052).
+//! epic and optional feature links of tickets (ticket 0052), plus the dismissible
+//! PRD warnings banner (ticket 0057).
 
 import { state } from "./state.js";
 import { ApiError, getDoc, saveDoc } from "./api.js";
@@ -39,6 +40,16 @@ let previewCaret = null;
 // The save conflict banner of the selected document (ticket 0027); null until a
 // document is loaded and rebuilt by `renderEditor`.
 let conflictBanner = null;
+// The PRD warnings banner of the open editor (ticket 0057); null until the editor
+// renders it and rebuilt by `renderEditor`, so it lives above the toolbar while
+// the person keeps typing. The server answers with the warnings of the document
+// response and returns an empty list for every document other than the PRD, so a
+// foreign document simply hides the banner.
+let prdWarningsBanner = null;
+// Whether the PRD warnings banner was dismissed for this page session (ticket
+// 0057); the module state resets on every reload, so the banner reappears after a
+// reload unless it was dismissed.
+let prdWarningsDismissed = false;
 
 // The refresh of the document tree after a save that can change a status
 // (ticket 0030); the sidebar owns the refresh implementation and hands it to the
@@ -624,6 +635,7 @@ export function renderEditor() {
     saveButton = null;
     previewButton = null;
     conflictBanner = null;
+    prdWarningsBanner = null;
     statusSelect = null;
     documentStatus = null;
     ticketLinks = null;
@@ -652,6 +664,18 @@ export function renderEditor() {
   conflictBanner.setAttribute("aria-live", "assertive");
   conflictBanner.hidden = true;
   conflictBanner.setAttribute("aria-hidden", "true");
+
+  // The PRD warnings banner lives inside the editor area so it can sit above the
+  // toolbar while the person keeps typing (ticket 0057); it is rebuilt on every
+  // render, so it starts hidden again for each freshly loaded document and the
+  // dismissal state lives in module state instead (ticket 0057).
+  prdWarningsBanner = document.createElement("div");
+  prdWarningsBanner.id = "prd-warnings";
+  prdWarningsBanner.className = "prd-warnings";
+  prdWarningsBanner.setAttribute("role", "alert");
+  prdWarningsBanner.setAttribute("aria-live", "assertive");
+  prdWarningsBanner.hidden = true;
+  prdWarningsBanner.setAttribute("aria-hidden", "true");
 
   const toolbar = document.createElement("div");
   toolbar.className = "editor-toolbar";
@@ -754,6 +778,7 @@ export function renderEditor() {
     pending.textContent = proposalPendingNote(state.proposal);
     element.appendChild(pending);
   }
+  element.appendChild(prdWarningsBanner);
   element.appendChild(toolbar);
   if (supersedesLine) {
     element.appendChild(supersedesLine);
@@ -915,6 +940,106 @@ function hideConflictBanner(bannerToHide = conflictBanner) {
   }
   bannerToHide.hidden = true;
   bannerToHide.setAttribute("aria-hidden", "true");
+}
+
+// Hides the PRD warnings banner; the caller decides whether warnings are shown.
+function hidePrdWarnings(bannerToHide = prdWarningsBanner) {
+  if (!bannerToHide) {
+    return;
+  }
+  bannerToHide.hidden = true;
+  bannerToHide.setAttribute("aria-hidden", "true");
+}
+
+// Dismisses the PRD warnings banner for this page session (ticket 0057); the
+// module-level dismissal state resets on every reload, so the banner reappears
+// after a reload unless it was dismissed.
+export function dismissPrdWarnings() {
+  prdWarningsDismissed = true;
+  hidePrdWarnings();
+}
+
+// The display text of one advisory PRD warning, or an empty string when the
+// warning is not one of the known kinds (ticket 0057).
+function prdWarningText(warning) {
+  if (warning === null || typeof warning !== "object") {
+    return "";
+  }
+  const kind = warning.kind;
+  if (kind === "prd_size") {
+    const bytes = Number(warning.bytes);
+    const limit = Number(warning.limit);
+    if (Number.isFinite(bytes) && Number.isFinite(limit)) {
+      return `This PRD is ${bytes} bytes, above the ${limit} byte limit.`;
+    }
+    return "";
+  }
+  if (kind === "code_block") {
+    const count = Number(warning.count);
+    if (Number.isFinite(count)) {
+      return `This PRD contains ${count} fenced code block${count === 1 ? "" : "s"}.`;
+    }
+    return "";
+  }
+  if (kind === "stack_heading") {
+    const heading = String(warning.heading ?? "");
+    if (heading) {
+      return `The heading "${heading}" looks like content that belongs in architecture.md or conventions.md.`;
+    }
+    return "";
+  }
+  return "";
+}
+
+// The display messages of the advisory PRD warnings, in warning order (ticket
+// 0057); blank or unknown warnings never render a message.
+function prdWarningMessages(warnings) {
+  const items = Array.isArray(warnings) ? warnings : [];
+  const messages = [];
+  for (const warning of items) {
+    const message = prdWarningText(warning);
+    if (message) {
+      messages.push(message);
+    }
+  }
+  return messages;
+}
+
+// Renders the advisory warnings of the open document into the PRD warnings
+// banner above the editor toolbar (ticket 0057). The server answers with the
+// warnings of the document response and returns an empty list for every document
+// other than the PRD, so a foreign document or a clean PRD hides the banner. The
+// warnings are advisory: they never block a save and the banner is a dismissible
+// notice above the editor, not a modal.
+export function renderPrdWarnings(warnings) {
+  if (!prdWarningsBanner) {
+    return;
+  }
+  prdWarningsBanner.replaceChildren();
+
+  const messages = prdWarningMessages(warnings);
+  if (prdWarningsDismissed || messages.length === 0) {
+    hidePrdWarnings();
+    return;
+  }
+
+  for (const message of messages) {
+    const paragraph = document.createElement("p");
+    paragraph.className = "prd-warnings-message";
+    paragraph.textContent = message;
+    prdWarningsBanner.appendChild(paragraph);
+  }
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.id = "prd-warnings-dismiss";
+  dismiss.textContent = "Dismiss";
+  dismiss.addEventListener("click", () => {
+    dismissPrdWarnings();
+  });
+  prdWarningsBanner.appendChild(dismiss);
+
+  prdWarningsBanner.hidden = false;
+  prdWarningsBanner.setAttribute("aria-hidden", "false");
 }
 
 // Whether the document a save or conflict action ran against is still the
@@ -1236,6 +1361,10 @@ export async function loadDocument(path) {
   textarea.value = freshDocument.content;
   textarea.focus();
   renderDirtyIndicator();
+  // The advisory warnings of the document response ride the reload of the open
+  // document (ticket 0057); the server answers with the warnings of the PRD and an
+  // empty list for every other document, so the banner renders nothing foreign.
+  renderPrdWarnings(freshDocument.warnings);
 }
 
 // After a successful save: surface the feature-index refresh outcome as

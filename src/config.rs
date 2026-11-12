@@ -21,6 +21,13 @@ pub struct CliArgs {
     pub open: bool,
 }
 
+/// The default maximum PRD size in bytes before a size warning is issued (ticket
+/// 0057).
+const DEFAULT_PRD_MAX_BYTES: u64 = 12_000;
+
+/// The upper bound of the `SDLC_PRD_MAX_BYTES` override (ticket 0057).
+const PRD_MAX_BYTES_LIMIT: u64 = 1_000_000;
+
 /// Errors from loading startup configuration.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -44,6 +51,8 @@ pub struct Config {
     open: bool,
     /// AI endpoint settings; `None` when chat is not configured.
     ai: Option<AiConfig>,
+    /// Maximum PRD size in bytes before a size warning is issued (ticket 0057).
+    prd_max_bytes: u64,
 }
 
 /// Connection settings for the OpenAI-compatible AI endpoint.
@@ -151,6 +160,7 @@ impl Config {
             port: args.port,
             open: args.open,
             ai,
+            prd_max_bytes: Self::resolve_prd_max_bytes(&lookup_env),
         })
     }
 
@@ -172,6 +182,30 @@ impl Config {
     /// The AI endpoint settings, when chat is configured.
     pub fn ai(&self) -> Option<&AiConfig> {
         self.ai.as_ref()
+    }
+
+    /// The maximum PRD size in bytes before a size warning is issued (ticket
+    /// 0057); the default is 12000 bytes and the `SDLC_PRD_MAX_BYTES` override is
+    /// capped at 1_000_000 bytes.
+    pub fn prd_max_bytes(&self) -> u64 {
+        self.prd_max_bytes
+    }
+
+    /// Resolves the maximum PRD size in bytes from the environment.
+    ///
+    /// The `SDLC_PRD_MAX_BYTES` override applies when it is a positive integer
+    /// within the upper bound; an absent, malformed, non-positive or over-bound
+    /// value falls back to the default, so an unusable override never disables or
+    /// unbounded the advisory warning.
+    fn resolve_prd_max_bytes(lookup_env: &impl Fn(&str) -> Option<String>) -> u64 {
+        let raw = lookup_env("SDLC_PRD_MAX_BYTES").unwrap_or_default();
+        let Ok(value) = raw.trim().parse::<u64>() else {
+            return DEFAULT_PRD_MAX_BYTES;
+        };
+        if value == 0 || value > PRD_MAX_BYTES_LIMIT {
+            return DEFAULT_PRD_MAX_BYTES;
+        }
+        value
     }
 
     /// Validates the project directory and canonicalizes it.
@@ -392,5 +426,65 @@ mod tests {
 
         assert!(matches!(err, ConfigError::InvalidDir(_)));
         assert!(err.to_string().contains("project directory"));
+    }
+
+    #[test]
+    fn prd_max_bytes_defaults_to_twelve_thousand() {
+        let config = Config::from_parts(CliArgs::parse_from(["sdlc"]), |_| None).expect("defaults");
+
+        assert_eq!(config.prd_max_bytes(), DEFAULT_PRD_MAX_BYTES);
+    }
+
+    #[test]
+    fn prd_max_bytes_env_override_is_honored() {
+        let config = config_for(
+            args(".", 9000, false),
+            &[("SDLC_PRD_MAX_BYTES", Some("500".to_string()))],
+        );
+
+        assert_eq!(config.prd_max_bytes(), 500);
+    }
+
+    #[test]
+    fn prd_max_bytes_rejects_values_above_the_upper_bound() {
+        let config = config_for(
+            args(".", 9000, false),
+            &[(
+                "SDLC_PRD_MAX_BYTES",
+                Some((PRD_MAX_BYTES_LIMIT + 1).to_string()),
+            )],
+        );
+
+        assert_eq!(config.prd_max_bytes(), DEFAULT_PRD_MAX_BYTES);
+    }
+
+    #[test]
+    fn prd_max_bytes_rejects_non_positive_values() {
+        let config = config_for(
+            args(".", 9000, false),
+            &[("SDLC_PRD_MAX_BYTES", Some("0".to_string()))],
+        );
+
+        assert_eq!(config.prd_max_bytes(), DEFAULT_PRD_MAX_BYTES);
+    }
+
+    #[test]
+    fn prd_max_bytes_accepts_the_upper_bound() {
+        let config = config_for(
+            args(".", 9000, false),
+            &[("SDLC_PRD_MAX_BYTES", Some(PRD_MAX_BYTES_LIMIT.to_string()))],
+        );
+
+        assert_eq!(config.prd_max_bytes(), PRD_MAX_BYTES_LIMIT);
+    }
+
+    #[test]
+    fn prd_max_bytes_falls_back_to_the_default_for_a_malformed_value() {
+        let config = config_for(
+            args(".", 9000, false),
+            &[("SDLC_PRD_MAX_BYTES", Some("not-a-number".to_string()))],
+        );
+
+        assert_eq!(config.prd_max_bytes(), DEFAULT_PRD_MAX_BYTES);
     }
 }

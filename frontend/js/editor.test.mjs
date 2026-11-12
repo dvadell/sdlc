@@ -118,6 +118,9 @@ const {
   setRefreshTree,
   proposalPendingNote,
   ticketFeatureOf,
+  renderPrdWarnings,
+  dismissPrdWarnings,
+  loadDocument,
 } = await import("./editor.js");
 
 const FEATURE = STATUS_OPTIONS.feature;
@@ -758,4 +761,99 @@ test("an overwrite that completes after a document switch hides the banner and r
   // and refreshed the tree of the document that was overwritten.
   assert.equal(banner.hidden, true);
   assert.equal(refreshes, 1);
+});
+
+// The dismissible PRD warnings banner of the editor (ticket 0057): the server
+// answers with the warnings of the PRD document response and with an empty list
+// for every other document, so the banner renders nothing foreign.
+
+function prdWarningsBannerElement() {
+  return editorElement.querySelector("#prd-warnings");
+}
+
+function prdWarningMessages() {
+  const banner = prdWarningsBannerElement();
+  const messages = [];
+  for (const child of banner?.children ?? []) {
+    if (child.className === "prd-warnings-message") {
+      messages.push(child.textContent);
+    }
+  }
+  return messages;
+}
+
+test("renderEditor renders a hidden PRD warnings banner above the editor toolbar", () => {
+  state.current.path = "sdlc/PRD.md";
+  state.current.content = "# Product requirements\n";
+  state.current.savedContent = "# Product requirements\n";
+  state.current.hash = "hash-1";
+  state.dirty = false;
+  renderEditor();
+  const banner = prdWarningsBannerElement();
+  assert.ok(banner);
+  assert.equal(banner.hidden, true);
+  assert.equal(banner.getAttribute("aria-hidden"), "true");
+});
+
+test("renderPrdWarnings hides the banner when the document carries no warnings", () => {
+  renderPrdWarnings([]);
+  assert.equal(prdWarningsBannerElement().hidden, true);
+});
+
+test("renderPrdWarnings shows the PRD size warning above the editor", () => {
+  renderPrdWarnings([{ kind: "prd_size", bytes: 15000, limit: 12000 }]);
+  const banner = prdWarningsBannerElement();
+  assert.equal(banner.hidden, false);
+  assert.deepEqual(prdWarningMessages(), ["This PRD is 15000 bytes, above the 12000 byte limit."]);
+});
+
+test("renderPrdWarnings shows the fenced code block warning with its count", () => {
+  renderPrdWarnings([{ kind: "code_block", count: 2 }]);
+  const banner = prdWarningsBannerElement();
+  assert.equal(banner.hidden, false);
+  assert.deepEqual(prdWarningMessages(), ["This PRD contains 2 fenced code blocks."]);
+});
+
+test("renderPrdWarnings shows the stack heading warning with the heading text", () => {
+  renderPrdWarnings([{ kind: "stack_heading", heading: "Dependencies" }]);
+  const banner = prdWarningsBannerElement();
+  assert.equal(banner.hidden, false);
+  assert.deepEqual(prdWarningMessages(), [
+    'The heading "Dependencies" looks like content that belongs in architecture.md or conventions.md.',
+  ]);
+});
+
+test("dismissing the PRD warnings banner hides it for the session", () => {
+  renderPrdWarnings([{ kind: "prd_size", bytes: 15000, limit: 12000 }]);
+  const banner = prdWarningsBannerElement();
+  assert.equal(banner.hidden, false);
+
+  const dismiss = editorElement.querySelector("#prd-warnings-dismiss");
+  assert.ok(dismiss);
+  dismiss.fire("click", {});
+  assert.equal(banner.hidden, true);
+
+  // The dismissal is session-only, so a re-render with the same warnings stays
+  // dismissed until the page reloads.
+  renderPrdWarnings([{ kind: "prd_size", bytes: 15000, limit: 12000 }]);
+  assert.equal(prdWarningsBannerElement().hidden, true);
+});
+
+test("renderPrdWarnings dismisses through the exported helper", () => {
+  renderPrdWarnings([]);
+  dismissPrdWarnings();
+  assert.equal(prdWarningsBannerElement().hidden, true);
+});
+
+test("loadDocument renders the PRD warnings of the document response", async () => {
+  state.current.path = null;
+  state.current.content = "";
+  state.current.savedContent = "";
+  state.current.hash = null;
+  state.dirty = false;
+  state.config = { prd_max_bytes: 12000 };
+  let payload = { content: "# PRD\n", hash: "hash-9", warnings: [] };
+  globalThis.fetch = async () => ({ ok: true, json: async () => payload });
+  await loadDocument("sdlc/PRD.md");
+  assert.equal(prdWarningsBannerElement().hidden, true);
 });
