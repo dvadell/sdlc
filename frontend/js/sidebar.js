@@ -585,6 +585,12 @@ export function groupOf(kind) {
 // one.
 export function groupEntries(docs) {
   const groups = new Map();
+  // The epic directories the tree lists, so the orphan decision of a ticket is
+  // an O(1) membership check instead of a scan over all documents per ticket
+  // (ticket 0053).
+  const epicSlugs = new Set(
+    (docs ?? []).filter((doc) => doc?.kind === "epic").map((doc) => doc?.path?.split("/")[2] ?? ""),
+  );
 
   const add = (group, entry) => {
     const entries = groups.get(group);
@@ -607,7 +613,7 @@ export function groupEntries(docs) {
       // of a broken directory, and a ticket whose epic directory is not listed is
       // derived as unassigned here, so the group never depends on a flag that was
       // not set (ticket 0053).
-      if (doc?.orphaned || !epicListed(docs, doc)) {
+      if (doc?.orphaned || !epicListed(doc, epicSlugs)) {
         add("unassigned", doc);
       }
     } else if (group !== null) {
@@ -641,15 +647,13 @@ export function groupEntries(docs) {
 // Whether the epic directory a ticket names is listed with a description, so
 // the ticket belongs to that epic instead of being an unassigned orphan of a
 // directory without one (ticket 0053).
-function epicListed(docs, ticket) {
+function epicListed(ticket, epicSlugs) {
   const epic = epicSlugOf(ticket?.path) || ticket?.epic || "";
   if (epic.length === 0) {
     // A ticket without an epic to name is not listed under any epic.
     return false;
   }
-  return (docs ?? []).some(
-    (doc) => doc?.kind === "epic" && (doc?.path?.split("/")[2] ?? "") === epic,
-  );
+  return epicSlugs.has(epic);
 }
 
 // The decision entries of one group, in numeric decision-number order; an entry
