@@ -979,6 +979,13 @@ body {
   display: none;
 }
 
+.prd-warnings-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  flex: 1 1 auto;
+}
+
 .prd-warnings-message {
   flex: 1 1 auto;
   margin: 0;

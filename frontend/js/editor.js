@@ -1023,12 +1023,15 @@ export function renderPrdWarnings(warnings) {
     return;
   }
 
+  const group = document.createElement("div");
+  group.className = "prd-warnings-messages";
   for (const message of messages) {
     const paragraph = document.createElement("p");
     paragraph.className = "prd-warnings-message";
     paragraph.textContent = message;
-    prdWarningsBanner.appendChild(paragraph);
+    group.appendChild(paragraph);
   }
+  prdWarningsBanner.appendChild(group);
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.id = "prd-warnings-dismiss";

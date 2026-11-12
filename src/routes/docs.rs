@@ -130,47 +130,22 @@ pub(crate) fn prd_warnings(content: &str, limit: u64) -> Vec<PrdWarning> {
     if bytes > limit {
         warnings.push(PrdWarning::Size { bytes, limit });
     }
-    let code_blocks = fenced_code_block_count(content);
+    let (code_blocks, headings) = fenced_code_blocks_and_stack_headings(content);
     if code_blocks > 0 {
         warnings.push(PrdWarning::CodeBlock { count: code_blocks });
     }
-    for heading in stack_headings(content) {
+    for heading in headings {
         warnings.push(PrdWarning::StackHeading { heading });
     }
     warnings
 }
 
-/// Counts the fenced code blocks of a markdown content (ticket 0057).
+/// The fenced code block count and the stack headings of a markdown content,
+/// from one pass over the content (ticket 0057).
 ///
-/// Paired, unpaired and indented fences all count; the open state of a fence is
-/// tracked, so a closing marker never opens another block and the marker lines of
-/// a block are never read as headings.
-fn fenced_code_block_count(content: &str) -> usize {
-    let mut count = 0;
-    let mut open = false;
-    for line in content.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if is_fence_line(line) {
-            if open {
-                open = false;
-            } else {
-                open = true;
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
-/// Whether a markdown line opens or closes a fenced code block (ticket 0057).
-fn is_fence_line(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
-}
-
-/// The headings of a markdown content whose text contains a stack-ish token,
-/// in document order, with the heading text (ticket 0057).
-fn stack_headings(content: &str) -> Vec<String> {
+/// The open fence state is shared by the code block count and the heading scan,
+/// so the two results come from one pass and cannot drift apart (ticket 0057).
+fn fenced_code_blocks_and_stack_headings(content: &str) -> (usize, Vec<String>) {
     const STACK_TOKENS: [&str; 5] = [
         "dependencies",
         "libraries",
@@ -178,13 +153,18 @@ fn stack_headings(content: &str) -> Vec<String> {
         "tooling",
         "code style",
     ];
-    let mut headings = Vec::new();
+    let mut code_blocks = 0;
     let mut open = false;
+    let mut headings = Vec::new();
     for line in content.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if is_fence_line(line) {
-            // A fence marker is never a heading, whatever it contains (ticket 0057).
-            open = !open;
+            if open {
+                open = false;
+            } else {
+                open = true;
+                code_blocks += 1;
+            }
             continue;
         }
         if open {
@@ -197,7 +177,13 @@ fn stack_headings(content: &str) -> Vec<String> {
             }
         }
     }
-    headings
+    (code_blocks, headings)
+}
+
+/// Whether a markdown line opens or closes a fenced code block (ticket 0057).
+fn is_fence_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
 }
 
 /// The text of an ATX heading line, without its markers (ticket 0057).

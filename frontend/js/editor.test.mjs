@@ -773,8 +773,10 @@ function prdWarningsBannerElement() {
 
 function prdWarningMessages() {
   const banner = prdWarningsBannerElement();
+  const group =
+    banner?.children?.find((child) => child.className === "prd-warnings-messages") ?? banner;
   const messages = [];
-  for (const child of banner?.children ?? []) {
+  for (const child of group?.children ?? []) {
     if (child.className === "prd-warnings-message") {
       messages.push(child.textContent);
     }
@@ -821,6 +823,20 @@ test("renderPrdWarnings shows the stack heading warning with the heading text", 
   assert.deepEqual(prdWarningMessages(), [
     'The heading "Dependencies" looks like content that belongs in architecture.md or conventions.md.',
   ]);
+});
+
+test("loadDocument shows the banner when the document response carries warnings", async () => {
+  state.current.path = null;
+  state.current.content = "";
+  state.current.savedContent = "";
+  state.current.hash = null;
+  state.dirty = false;
+  state.config = { prd_max_bytes: 12000 };
+  const payload = { content: "# PRD\n", hash: "hash-10", warnings: [{ kind: "prd_size", bytes: 15000, limit: 12000 }] };
+  globalThis.fetch = async () => ({ ok: true, json: async () => payload });
+  await loadDocument("sdlc/PRD.md");
+  assert.equal(prdWarningsBannerElement().hidden, false);
+  assert.deepEqual(prdWarningMessages(), ["This PRD is 15000 bytes, above the 12000 byte limit."]);
 });
 
 test("dismissing the PRD warnings banner hides it for the session", () => {
