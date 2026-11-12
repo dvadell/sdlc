@@ -47,4 +47,14 @@
   captured value at the closure-body scope (before the `async move`) and consume the
   local clone inside, or the borrow checker rejects the move with E0507.
 
+- `std::path::Path` has no `to_slash_lossy` in this toolchain; normalize a watched
+  path to the slash-separated form the document paths validate with
+  `to_string_lossy().into_owned().replace('\\', "/")` before validating or keying a
+  recent-write map.
+
+- A refactor of a write path that moves the "record the write" step after the
+  filesystem write must update the doc comment of the recording step in the same
+  change; the old invariant ("the caller records before the write completes") then
+  silently describes a path that no longer exists.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
