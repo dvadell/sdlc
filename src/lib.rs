@@ -10,10 +10,12 @@ pub mod proposal;
 pub mod routes;
 pub mod state;
 pub mod store;
+pub mod watch;
 
 pub use crate::config::{CliArgs, Config, ConfigError};
 pub use crate::error::ServerError;
 pub use crate::state::AppState;
+pub use crate::watch::{EventHub, FileChanged};
 
 use std::io;
 use std::net::SocketAddr;
@@ -96,6 +98,19 @@ pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, 
         open_browser(&format!("http://{addr}"));
     }
 
+    // The watcher starts once the listener is bound and keeps serving even when
+    // it fails, so editing a document never depends on file system events.
+    let watcher = match watch::start(state.config.project_dir(), &state.events).await {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "the file watcher failed to start; external edits will not be announced"
+            );
+            None
+        }
+    };
+
     let shutdown = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -107,6 +122,10 @@ pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, 
             port: configured_port,
             source,
         })?;
+
+    if let Some(watcher) = watcher {
+        watcher.abort();
+    }
 
     Ok(addr)
 }

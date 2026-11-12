@@ -6,6 +6,7 @@ use crate::chat::{ChatClient, ChatError};
 use crate::config::Config;
 use crate::proposal::ProposalService;
 use crate::store::DocStore;
+use crate::watch::EventHub;
 
 /// State cloned into every handler.
 ///
@@ -24,6 +25,8 @@ pub struct AppState {
     pub chat: Arc<ChatClient>,
     /// The in-memory proposal service that turns chat blocks into proposals.
     pub proposals: Arc<ProposalService>,
+    /// The event hub that publishes debounced file changes to SSE subscribers.
+    pub events: Arc<EventHub>,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
         };
 
         let proposals = Arc::new(ProposalService::new(store.clone()));
+        let events = Arc::new(EventHub::new());
 
         Ok(Self {
             config: Arc::new(config),
@@ -53,6 +57,7 @@ impl AppState {
             bound_port,
             chat,
             proposals,
+            events,
         })
     }
 }
