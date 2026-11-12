@@ -254,14 +254,14 @@ A built-in prompt sends the feature spec plus `conventions.md` to the model, ask
 
 ## 12. Decisions to record
 
-These choices are made in this document and should each get a file in `sdlc/decisions/`:
+These choices are made in this document and recorded as decision files in `sdlc/decisions/`:
 
-1. Use `axum` on `tokio` for the server.
-2. Files as the only storage; no database.
-3. Proposals via text blocks, not tool calling.
-4. Server computes diffs from full-file content.
-5. Stateless chat endpoint; history lives in the browser.
-6. Plain HTML/CSS/JavaScript for the embedded frontend, with no build step and two vendored libraries.
-7. Optimistic concurrency with content hashes instead of file locks.
-8. Epics as directories with a `description.md` and a `tickets/` subdirectory; a ticket's path determines its exact epic.
-9. The YAML front matter crate chosen in 0012 (recorded there as an ADR).
+1. Use `axum` on `tokio` for the server: [0001](decisions/0001-use-axum-on-tokio.md).
+2. Files as the only storage; no database: [0002](decisions/0002-files-as-the-only-storage.md).
+3. Proposals via text blocks, not tool calling: [0003](decisions/0003-proposals-via-text-blocks-not-tool-calling.md).
+4. Server computes diffs from full-file content: [0004](decisions/0004-server-computes-diffs-from-full-content.md).
+5. Stateless chat endpoint; history lives in the browser: [0005](decisions/0005-stateless-chat-endpoint.md).
+6. Plain HTML/CSS/JavaScript for the embedded frontend, with no build step and two vendored libraries: [0006](decisions/0006-plain-html-css-and-javascript.md).
+7. Optimistic concurrency with content hashes instead of file locks: [0007](decisions/0007-optimistic-concurrency-with-content-hashes.md).
+8. Epics as directories with a `description.md` and a `tickets/` subdirectory; a ticket's path determines its exact epic: [0008](decisions/0008-epics-as-directories-with-tickets.md).
+9. The YAML front matter crate chosen in 0012 (recorded there as an ADR): [0009](decisions/0009-use-serde-yaml-ng.md).

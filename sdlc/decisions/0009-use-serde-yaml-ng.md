@@ -16,6 +16,13 @@ can depend on one.
 Use `serde_yaml_ng` 0.10, the maintained fork of the archived `serde_yaml`, with
 serde derive for the front matter structs.
 
+## Alternatives considered
+
+- `serde_yaml`, the original crate: rejected, it is archived and therefore no
+  longer maintained.
+- The other maintained forks evaluated at the time, `serde_norway` and `saphyr`:
+  considered and not chosen.
+
 ## Consequences
 
 - The archived `serde_yaml` is not used; `serde_yaml_ng` is the single YAML
