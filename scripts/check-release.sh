@@ -29,9 +29,13 @@ fail() {
     exit 1
 }
 
-[ -x "$BINARY" ] || fail "the release binary is missing; run 'just release' first"
+for cmd in curl jq; do
+    command -v "$cmd" >/dev/null 2>&1 || fail "$cmd is required but not found in PATH"
+done
 
 cargo build --release
+
+[ -x "$BINARY" ] || fail "cargo build --release completed but the binary is missing at $BINARY"
 
 cp "$BINARY" "$WORKDIR/sdlc"
 chmod +x "$WORKDIR/sdlc"
@@ -41,6 +45,7 @@ VERSION_OUTPUT="$("$WORKDIR/sdlc" --version)"
 EXPECTED_VERSION="${VERSION_OUTPUT##* }"
 
 cd "$WORKDIR"
+unset SDLC_AI_BASE_URL SDLC_AI_MODEL SDLC_AI_API_KEY
 "$WORKDIR/sdlc" --dir "$PROJECT" --port 0 > "$WORKDIR/server.log" 2>&1 &
 PID=$!
 
@@ -65,7 +70,7 @@ esac
 
 CODE=""
 for _ in $(seq 1 30); do
-    CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: 127.0.0.1:$PORT" "http://127.0.0.1:$PORT/api/config" || true)"
+    CODE="$(curl -s -o "$WORKDIR/config.json" -w '%{http_code}' "http://127.0.0.1:$PORT/api/config" || true)"
     if [ "$CODE" = "200" ]; then
         break
     fi
@@ -78,19 +83,16 @@ done
 
 [ "$CODE" = "200" ] || fail "GET /api/config answered with status $CODE"
 
-PAGE_CODE="$(curl -s -o "$WORKDIR/page.html" -w '%{http_code}' -H "Host: 127.0.0.1:$PORT" "http://127.0.0.1:$PORT/")"
+PAGE_CODE="$(curl -s -o "$WORKDIR/page.html" -w '%{http_code}' "http://127.0.0.1:$PORT/")"
 [ "$PAGE_CODE" = "200" ] || fail "GET / answered with status $PAGE_CODE"
 
 grep -q 'id="sidebar"' "$WORKDIR/page.html" || fail "GET / did not answer with the entry page marker"
 
-PAGE_CONTENT_TYPE="$(curl -s -o /dev/null -w '%{content_type}' -H "Host: 127.0.0.1:$PORT" "http://127.0.0.1:$PORT/")"
+PAGE_CONTENT_TYPE="$(curl -s -o /dev/null -w '%{content_type}' "http://127.0.0.1:$PORT/")"
 case "$PAGE_CONTENT_TYPE" in
     text/html*) ;;
     *) fail "GET / answered with content type $PAGE_CONTENT_TYPE" ;;
 esac
-
-CONFIG_CODE="$(curl -s -o "$WORKDIR/config.json" -w '%{http_code}' -H "Host: 127.0.0.1:$PORT" "http://127.0.0.1:$PORT/api/config")"
-[ "$CONFIG_CODE" = "200" ] || fail "GET /api/config answered with status $CONFIG_CODE"
 
 jq -e . "$WORKDIR/config.json" > /dev/null 2>&1 || fail "GET /api/config did not answer with JSON"
 
