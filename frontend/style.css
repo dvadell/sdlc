@@ -190,6 +190,14 @@ body {
   padding: 0 0.4rem 0.3rem;
 }
 
+/* The explanatory hint of the Unassigned group of the sidebar (ticket 0053);
+   it reads as secondary text next to the group heading and rows. */
+#sidebar .doc-hint {
+  margin: 0.25rem 0.4rem;
+  font-size: 0.75rem;
+  color: #666666;
+}
+
 /* The optional "Tickets for current epic" filter of the sidebar (ticket 0053);
    the toggle reuses the plain action styling until the ticket list grows its own
    visual language. */

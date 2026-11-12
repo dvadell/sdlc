@@ -603,8 +603,11 @@ export function groupEntries(docs) {
       // A ticket belongs to the epic directory that contains it, so it joins that
       // epic's group through the epic entry and its ticket list; a ticket whose
       // epic directory has no description is orphaned and grouped under Unassigned
-      // instead (ticket 0048, ticket 0053).
-      if (doc?.orphaned) {
+      // instead (ticket 0048, ticket 0053). The server marks the orphaned tickets
+      // of a broken directory, and a ticket whose epic directory is not listed is
+      // derived as unassigned here, so the group never depends on a flag that was
+      // not set (ticket 0053).
+      if (doc?.orphaned || !epicListed(docs, doc)) {
         add("unassigned", doc);
       }
     } else if (group !== null) {
@@ -621,14 +624,13 @@ export function groupEntries(docs) {
       // are listed by epic number and orphaned tickets by ticket number, so the
       // sidebar shows every one of them in numeric order whatever order the server
       // answered with (ticket 0053).
-      const sorted =
-        group === "decision"
-          ? sortDecisions(entries)
-          : group === "epic"
-            ? sortEpics(entries)
-            : group === "unassigned"
-              ? sortOrphanedTickets(entries)
-              : entries;
+      const sorters = {
+        decision: sortDecisions,
+        epic: sortEpics,
+        unassigned: sortOrphanedTickets,
+      };
+      const sorter = sorters[group];
+      const sorted = sorter ? sorter(entries) : entries;
       ordered.push([group, sorted]);
     }
   }
@@ -636,50 +638,43 @@ export function groupEntries(docs) {
   return ordered;
 }
 
+// Whether the epic directory a ticket names is listed with a description, so
+// the ticket belongs to that epic instead of being an unassigned orphan of a
+// directory without one (ticket 0053).
+function epicListed(docs, ticket) {
+  const epic = epicSlugOf(ticket?.path) || ticket?.epic || "";
+  if (epic.length === 0) {
+    // A ticket without an epic to name is not listed under any epic.
+    return false;
+  }
+  return (docs ?? []).some(
+    (doc) => doc?.kind === "epic" && (doc?.path?.split("/")[2] ?? "") === epic,
+  );
+}
+
 // The decision entries of one group, in numeric decision-number order; an entry
 // that does not name a decision number sorts after the numbered ones.
 function sortDecisions(entries) {
-  const numberOf = (entry) => decisionNumberOf(entry?.path);
-  const compare = (a, b) => {
-    const left = numberOf(a);
-    const right = numberOf(b);
-    // Decision entries name the number the server assigned, so a null number is
-    // a malformed entry; keep it after the numbered decisions instead of
-    // silently sorting it first (ticket 0032, final closing review round).
-    if (left === null) {
-      return right === null ? 0 : 1;
-    }
-    if (right === null) {
-      return -1;
-    }
-    return left - right;
-  };
-  return [...entries].sort(compare);
+  return sortByNumber(entries, (entry) => decisionNumberOf(entry?.path));
 }
 
 // The epic entries of the epic group, in numeric epic-number order (ticket 0053);
 // an epic that does not name a number sorts after the numbered epics.
 function sortEpics(entries) {
-  const numberOf = (entry) => epicNumber(entry);
-  const compare = (a, b) => {
-    const left = numberOf(a);
-    const right = numberOf(b);
-    if (left === null) {
-      return right === null ? 0 : 1;
-    }
-    if (right === null) {
-      return -1;
-    }
-    return left - right;
-  };
-  return [...entries].sort(compare);
+  return sortByNumber(entries, (entry) => epicNumber(entry));
 }
 
 // The orphaned tickets of the Unassigned group, in numeric ticket-number order
 // (ticket 0053); an entry that does not name a number sorts after the numbered
 // orphans, exactly like the numbered decisions of ticket 0032.
 function sortOrphanedTickets(entries) {
-  const numberOf = (entry) => ticketNumber(entry);
+  return sortByNumber(entries, (entry) => ticketNumber(entry));
+}
+
+// Sorts the entries of one numeric group by the number one entry names, keeping
+// the entries that name no number after the numbered ones; the shared comparator
+// of the numeric group listings of ticket 0053.
+function sortByNumber(entries, numberOf) {
   const compare = (a, b) => {
     const left = numberOf(a);
     const right = numberOf(b);
@@ -699,19 +694,7 @@ function sortOrphanedTickets(entries) {
 // epic are the ones that name it and are listed by ticket number.
 export function ticketsOfEpic(docs, epic) {
   const tickets = (docs ?? []).filter((doc) => doc?.kind === "ticket" && doc?.epic === epic);
-  const numberOf = (entry) => ticketNumber(entry);
-  const compare = (a, b) => {
-    const left = numberOf(a);
-    const right = numberOf(b);
-    if (left === null) {
-      return right === null ? 0 : 1;
-    }
-    if (right === null) {
-      return -1;
-    }
-    return left - right;
-  };
-  return [...tickets].sort(compare);
+  return sortByNumber(tickets, (entry) => ticketNumber(entry));
 }
 
 // How many tickets the tree lists under the given epic directory.
@@ -823,8 +806,12 @@ function createTicketsFilter() {
   button.className = "doc-filter";
   button.textContent =
     state.ticketsForCurrentEpic === true ? "Showing tickets of the open epic" : "Tickets for current epic";
+  button.disabled = actionsDisabled;
+  button.setAttribute("aria-pressed", String(state.ticketsForCurrentEpic === true));
   button.addEventListener("click", () => {
     state.ticketsForCurrentEpic = state.ticketsForCurrentEpic !== true;
+    button.setAttribute("aria-pressed", String(state.ticketsForCurrentEpic === true));
+    renderSidebar();
   });
   return button;
 }
@@ -915,22 +902,24 @@ export function renderSidebar() {
       // numeric ticket order, instead of living in a flat ticket group of their
       // own (ticket 0053); the epic entries themselves are ordered by epic number.
       for (const entry of entries ?? []) {
-        const epic = epicDirectoryOf(entry.path) ?? entry.path.split("/")[2] ?? "";
+        const epic = epicSlugOf(entry.path) ?? "";
         list.appendChild(createRow("epic", entry, tree.docs));
-        for (const ticket of ticketsOfEpic(tree.docs, epic)) {
-          list.appendChild(createRow("ticket", ticket, tree.docs));
+        if (epic) {
+          for (const ticket of ticketsOfEpic(tree.docs, epic)) {
+            list.appendChild(createRow("ticket", ticket, tree.docs));
+          }
         }
       }
     } else if (group === "unassigned") {
       // The orphaned tickets of ticket 0048 are grouped under Unassigned from
       // ticket 0053, with a hint about the parent directory without description.
-      if (hasEntries) {
-        const hint = document.createElement("p");
-        hint.className = "doc-hint";
-        hint.textContent =
-          "The parent epic directory has no description.md, so these tickets are unassigned.";
-        element.appendChild(hint);
-      }
+      // The group is only reached for a non-empty list, so the hint is rendered
+      // without re-checking the entries here.
+      const hint = document.createElement("p");
+      hint.className = "doc-hint";
+      hint.textContent =
+        "The parent epic directory has no description.md, so these tickets are unassigned.";
+      element.appendChild(hint);
       for (const entry of entries ?? []) {
         list.appendChild(createRow("ticket", entry, tree.docs));
       }
