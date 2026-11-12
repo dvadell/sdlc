@@ -33,7 +33,11 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 const HEARTBEAT_FRAME: &str = ": heartbeat\n\n";
 
 /// The event stream of one subscriber of the file change hub.
-type EventStream = Pin<Box<dyn Stream<Item = Result<String, std::io::Error>> + Send>>;
+///
+/// The stream only ever yields frames or ends, so its error type is
+/// [`std::convert::Infallible`] and the never-failing contract is explicit (ticket
+/// 0056).
+type EventStream = Pin<Box<dyn Stream<Item = Result<String, std::convert::Infallible>> + Send>>;
 
 /// Handles `GET /api/events`.
 ///

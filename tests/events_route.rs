@@ -147,9 +147,14 @@ async fn the_events_route_streams_two_file_changed_events_in_order() {
 
     let (mut stream, mut buffer) = connect_and_wait_for_head(&server).await;
 
-    // The watcher needs a moment after the server start before it reports the
-    // changes of the next write (ticket 0054).
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait for the watcher to be live before writing, by watching a sentinel
+    // document instead of guessing a delay (ticket 0056).
+    write(&dir, "sdlc/conventions.md", "# Conventions\n");
+    assert!(
+        read_until(&mut stream, &mut buffer, "sdlc/conventions.md").await,
+        "the watcher should deliver the sentinel event"
+    );
+    buffer.clear();
 
     write(&dir, "sdlc/PRD.md", "# First\n");
     assert!(

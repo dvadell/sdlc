@@ -79,6 +79,10 @@ function pausedElement() {
     element.setAttribute("role", "status");
     element.hidden = true;
     pausedHint = element;
+    // The hint renders in the header; when the element is not part of the page
+    // yet, the created element is attached, so it is visible once it is shown
+    // instead of staying an orphan (ticket 0056).
+    document.body.appendChild(element);
   }
   return pausedHint;
 }
@@ -87,9 +91,19 @@ function pausedElement() {
 // the open document when it is clean, ask through the conflict banner when it is
 // dirty, refresh the tree when another document changed.
 async function handleFileChanged(event) {
-  const path = event?.data?.path;
+  // The browser delivers the data of a `file-changed` message event as the raw
+  // JSON string of the frame, so the payload is parsed before the path is read
+  // (ticket 0056).
+  let path;
+  try {
+    const parsed = JSON.parse(event?.data ?? "null");
+    path = parsed?.path;
+  } catch {
+    // A non-JSON or empty data payload carries no document; nothing to do.
+    return;
+  }
   if (typeof path !== "string" || path.length === 0) {
-    // A malformed event carries no document; nothing to do for it.
+    // A malformed event carries no document; nothing to do.
     return;
   }
   if (path === state.current?.path) {
@@ -125,7 +139,9 @@ async function handleOpenDocument(path) {
     await loadDocument(path);
   } catch (error) {
     // The document may have been deleted between the event and the reload; the
-    // open state is left untouched either way (ticket 0056).
+    // open state is left untouched either way, but an unexpected failure is
+    // surfaced so a missed reload is diagnosable (ticket 0056).
+    console.warn("file-change reload failed", error);
     return;
   }
   editorRestoreSelection(selection);

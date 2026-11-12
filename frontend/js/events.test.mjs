@@ -172,13 +172,29 @@ test("a clean open document reloads when it changes externally", async () => {
 
   const source = new FakeEventSource();
   startEvents(source);
-  source.fire("file-changed", { data: { path: "sdlc/PRD.md" } });
+  source.fire("file-changed", { data: JSON.stringify({ path: "sdlc/PRD.md" }) });
   await flush();
 
   assert.equal(state.current.hash, "server-hash");
   assert.equal(state.current.content, "# PRD v2\n");
   assert.equal(state.current.savedContent, "# PRD v2\n");
   assert.equal(state.dirty, false);
+
+  stopEvents();
+});
+
+test("a malformed file-change frame is ignored without reloading", async () => {
+  loadCleanDoc("sdlc/PRD.md", "# PRD\n", "hash-1");
+  globalThis.fetch = async () =>
+    ({ ok: true, json: async () => ({ path: "sdlc/PRD.md", content: "# PRD v2\n", hash: "server-hash" }) });
+
+  const source = new FakeEventSource();
+  startEvents(source);
+  source.fire("file-changed", { data: "not-json" });
+  await flush();
+
+  assert.equal(state.current.hash, "hash-1", "the malformed frame reloads nothing");
+  assert.equal(state.current.content, "# PRD\n");
 
   stopEvents();
 });
@@ -193,7 +209,7 @@ test("a dirty open document keeps the local text and shows the conflict banner",
 
   const source = new FakeEventSource();
   startEvents(source);
-  source.fire("file-changed", { data: { path: "sdlc/PRD.md" } });
+  source.fire("file-changed", { data: JSON.stringify({ path: "sdlc/PRD.md" }) });
   await flush();
 
   const banner = editorElement.querySelector("#conflict-banner");
@@ -217,7 +233,7 @@ test("a change of another document refreshes the tree without touching the edito
 
   const source = new FakeEventSource();
   startEvents(source);
-  source.fire("file-changed", { data: { path: "sdlc/features/export.md" } });
+  source.fire("file-changed", { data: JSON.stringify({ path: "sdlc/features/export.md" }) });
   await flush();
 
   assert.equal(state.current.content, "# PRD\n", "the open document is not reloaded");
@@ -248,7 +264,7 @@ test("a file change of the open document is ignored while a save is in flight", 
 
   const source = new FakeEventSource();
   startEvents(source);
-  source.fire("file-changed", { data: { path: "sdlc/features/export.md" } });
+  source.fire("file-changed", { data: JSON.stringify({ path: "sdlc/features/export.md" }) });
   await flush();
   const banner = editorElement.querySelector("#conflict-banner");
   assert.equal(banner.hidden, true, "the in-flight save owns the hash, so the event is ignored");
