@@ -9,6 +9,7 @@ import {
 import { loadDocument, save, setRefreshTree } from "./editor.js";
 import { hideError, installErrorBanner, showError } from "./errors.js";
 import { renderChat } from "./chat.js";
+import { startEvents } from "./events.js";
 
 const projectName = document.querySelector("#project-name");
 const aiStatus = document.querySelector("#ai-status");
@@ -76,6 +77,10 @@ async function boot() {
   // the hook the editor owns; the sidebar owns the refresh implementation.
   setRefreshTree(() => refreshTree());
   installSaveShortcut();
+  // The file-change stream of the server opens one EventSource at startup and
+  // reloads or asks about the open document on `file-changed` events (ticket
+  // 0056).
+  startEvents();
 
   const results = await Promise.allSettled([getConfig(), getTree()]);
   const failures = results

@@ -383,6 +383,7 @@ Files:
 | `js/main.js` | Startup, wiring, keyboard shortcuts |
 | `js/api.js` | `fetch` wrappers for every API route |
 | `js/sse.js` | The SSE reader for POST bodies: the `readSse()` async generator over a fetch body stream |
+| `js/events.js` | The SSE client for file changes: the `EventSource("/api/events")` connection, the clean reload, the dirty conflict banner and the silent tree refresh |
 | `js/state.js` | The shared `state` object |
 | `js/sidebar.js` | Document tree and create/rename/delete actions |
 | `js/editor.js` | Textarea, save, preview toggle |

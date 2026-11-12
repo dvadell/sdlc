@@ -854,6 +854,7 @@ export function renderSidebar() {
   }
 
   bindClickDelegation();
+  element.appendChild(createRefreshButton());
 
   if ((tree.docs ?? []).some((doc) => doc?.kind === "ticket")) {
     element.appendChild(createTicketsFilter());
@@ -934,6 +935,22 @@ export function renderSidebar() {
     }
     element.appendChild(list);
   }
+}
+
+// The manual fallback refresh of the document tree (ticket 0056): the SSE stream
+// delivers external changes, and this action answers an explicit refresh when the
+// person wants to pull the latest tree state without waiting for an event.
+function createRefreshButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "sidebar-refresh";
+  button.className = "new-doc";
+  button.textContent = "Refresh tree";
+  button.disabled = actionsDisabled;
+  button.addEventListener("click", () => {
+    void refreshTree();
+  });
+  return button;
 }
 
 // The per-group creation button; it prompts for the title and delegates to the

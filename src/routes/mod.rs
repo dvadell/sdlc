@@ -4,6 +4,7 @@ pub mod assets;
 pub mod chat;
 pub mod config;
 pub mod docs;
+pub mod events;
 pub mod proposals;
 
 use axum::{
@@ -40,6 +41,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/docs/move", move_route)
         .route("/api/scaffold", scaffold_route)
         .route("/api/docs/{*path}", docs_route.delete(docs::delete_doc))
+        .route("/api/events", get(events::get_events))
         .route("/api/chat", chat_route)
         .route("/api/proposals/{id}/accept", accept_route)
         .route("/api/proposals/{id}/reject", reject_route)

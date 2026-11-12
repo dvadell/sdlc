@@ -165,6 +165,13 @@ fn handle_result(hub: &EventHub, root: &Path, result: DebounceEventResult) {
             // event per path (ticket 0054).
             let mut published = std::collections::HashSet::new();
             for debounced in events {
+                // Reads of a document surface as access events too, but only a
+                // change of the content of a document is a document change, so the
+                // watcher hashes its own reads without notifying about them
+                // (ticket 0054).
+                if debounced.event.kind.is_access() {
+                    continue;
+                }
                 for path in &debounced.event.paths {
                     if !published.insert(path.clone()) {
                         continue;

@@ -852,7 +852,7 @@ export function renderTicketLinks() {
 // Shows the non-modal save conflict banner: the disk changed since the person
 // opened the document, so the local text is kept and the choice is theirs
 // (ticket 0027). Never auto-merges and never retries.
-function showConflictBanner() {
+export function showConflictBanner() {
   if (!conflictBanner) {
     return;
   }
@@ -1144,6 +1144,16 @@ async function overwriteWithMine() {
   }
 }
 
+// Whether a save or status save of the given document is currently in flight;
+// the file-change events of such a document are ignored until the save response
+// owns the hash again (ticket 0055, ticket 0056).
+export function isSaveInFlight(path) {
+  if (saveInFlightOwners.has(path)) {
+    return true;
+  }
+  return statusSaving && statusSavingPath === path;
+}
+
 // Whether a feature slug the ticket names resolves to an existing feature
 // document, so an edited ticket feature can be validated on save (ticket 0052).
 function featureResolves(feature) {
@@ -1159,6 +1169,31 @@ function featureResolves(feature) {
 // that detached the textarea still reads the text the person is editing.
 export function editorText() {
   return textarea?.isConnected ? textarea.value : (state.current?.content ?? "");
+}
+
+// The textarea selection of the editor buffer, or null when the buffer has no
+// connected textarea; the file-change reloads of a clean document use it to put
+// the caret back after replacing the content (ticket 0056).
+export function editorSelection() {
+  const target = textarea?.isConnected ? textarea : null;
+  if (!target) {
+    return null;
+  }
+  return { start: target.selectionStart ?? 0, end: target.selectionEnd ?? 0 };
+}
+
+// Restores a selection captured by `editorSelection` on the editor textarea, so
+// a reload that replaces the content keeps the person's caret position when
+// practical (ticket 0056).
+export function editorRestoreSelection(selection) {
+  const target = textarea?.isConnected ? textarea : null;
+  if (!target || !selection) {
+    return;
+  }
+  const length = String(target.value ?? "").length;
+  const start = Math.max(0, Math.min(selection.start ?? 0, length));
+  const end = Math.max(start, Math.min(selection.end ?? start, length));
+  target.setSelectionRange(start, end);
 }
 
 // Restores the editor area after a proposal decision: re-renders the editor
