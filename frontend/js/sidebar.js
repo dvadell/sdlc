@@ -117,7 +117,7 @@ function renameDestination(entry, newTitle) {
   const slug = slugifyTitle(newTitle);
   const segments = entry.path.split("/");
   if (entry.kind === "epic") {
-    const epic = epicSlugOf(entry.path);
+    const epic = epicSlugOf(entry.path) ?? "";
     const number = epic.split("-")[0] ?? "";
     return `sdlc/epics/${number}-${slug}/description.md`;
   }
@@ -159,7 +159,7 @@ function deleteMessage(entry) {
   const path = entry.path;
   let message = `Delete ${entry.kind} "${entry.title}" at ${path}? This cannot be undone.`;
   if (entry.kind === "epic") {
-    const epic = epicSlugOf(path);
+    const epic = epicSlugOf(path) ?? "";
     const count = ticketCount(state.tree?.docs ?? [], epic);
     if (count > 0) {
       message += ` ${count} ${count === 1 ? "ticket is" : "tickets are"} still assigned; delete or move them first.`;

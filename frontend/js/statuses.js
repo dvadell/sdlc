@@ -60,15 +60,22 @@ function pathSegments(path) {
   return String(path ?? "").replace(/^\//, "").split("/");
 }
 
-export function statusKindOf(path) {
-  const segments = pathSegments(path);
-  const invalidSegment = (segment) =>
+// Whether a path segment is one the server's document path rules reject: a
+// dot segment, an empty segment, a NUL or a backslash; the same predicate the
+// status and slug helpers of this module share (ticket 0052).
+function isInvalidSegment(segment) {
+  return (
     segment === ".." ||
     segment === "." ||
     segment === "" ||
     segment.includes("\0") ||
-    segment.includes("\\");
-  if (segments.some((segment) => invalidSegment(segment))) {
+    segment.includes("\\")
+  );
+}
+
+export function statusKindOf(path) {
+  const segments = pathSegments(path);
+  if (segments.some((segment) => isInvalidSegment(segment))) {
     // A path that the server's document path rules reject never carries a status
     // control, so judge it strictly and return no kind for it instead of being
     // lenient about backslash or dot-segmented paths the server would refuse
@@ -152,9 +159,7 @@ export function decisionNumberOf(path) {
 // source of truth for the epic a ticket belongs to (ticket 0049).
 export function epicDirectoryOf(path) {
   const segments = pathSegments(path);
-  const invalidSegment = (segment) =>
-    segment === ".." || segment === "." || segment === "" || segment.includes("\0") || segment.includes("\\");
-  if (segments.some((segment) => invalidSegment(segment))) {
+  if (segments.some((segment) => isInvalidSegment(segment))) {
     // A path that the server's document path rules reject never names an epic.
     return null;
   }
@@ -178,9 +183,7 @@ export function epicDirectoryOf(path) {
 // (ticket 0052).
 export function epicSlugOf(path) {
   const segments = pathSegments(String(path ?? ""));
-  const invalidSegment = (segment) =>
-    segment === ".." || segment === "." || segment === "" || segment.includes("\0") || segment.includes("\\");
-  if (segments.some((segment) => invalidSegment(segment))) {
+  if (segments.some((segment) => isInvalidSegment(segment))) {
     // A path that the server's document path rules reject never names an epic.
     return null;
   }
@@ -196,9 +199,7 @@ export function epicSlugOf(path) {
 // (ticket 0052).
 export function featureSlugOf(path) {
   const segments = pathSegments(String(path ?? ""));
-  const invalidSegment = (segment) =>
-    segment === ".." || segment === "." || segment === "" || segment.includes("\0") || segment.includes("\\");
-  if (segments.some((segment) => invalidSegment(segment))) {
+  if (segments.some((segment) => isInvalidSegment(segment))) {
     // A path that the server's document path rules reject never names a feature.
     return null;
   }
