@@ -213,8 +213,10 @@ impl RecentWrites {
 
     /// Records the write of `path` with the content hash it produced (ticket 0055).
     ///
-    /// The caller records before the write completes, because the content is
-    /// known before the write runs and the watcher event cannot arrive first.
+    /// The caller records after the write completes: the content hash is known
+    /// before the write, and the watcher's debounce window (300 ms) ensures the
+    /// debounced event fires only after the write is finished, so recording
+    /// after the write still suppresses the event the write produced.
     pub fn record_write(&self, path: &str, hash: &str) {
         self.record(path, Some(hash));
     }
@@ -890,7 +892,12 @@ fn epic_moved_tickets(
         return Ok(Vec::new());
     };
     let tickets_dir = from_dir.join("tickets");
-    let entries = std::fs::read_dir(&tickets_dir)?;
+    let entries = match std::fs::read_dir(&tickets_dir) {
+        Ok(entries) => entries,
+        // An epic directory without a `tickets` directory moves no ticket, so
+        // the move is remembered for none (ticket 0055).
+        Err(_) => return Ok(Vec::new()),
+    };
     let mut moved = Vec::new();
     for entry in entries.filter_map(|entry| entry.ok()) {
         let file_name = entry.file_name();
@@ -898,6 +905,13 @@ fn epic_moved_tickets(
             continue;
         };
         if !file_name.ends_with(".md") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
             continue;
         }
         let old_path = format!("sdlc/epics/{from_epic}/tickets/{file_name}");
