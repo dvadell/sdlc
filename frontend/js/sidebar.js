@@ -4,7 +4,7 @@ import { state } from "./state.js";
 import { createDoc, deleteDoc, getTree, moveDoc, scaffold } from "./api.js";
 import { showError, showResponseWarnings, showWarning, warningsToText } from "./errors.js";
 import { clearEditor } from "./editor.js";
-import { openDecisionCreateDialog } from "./dialogs.js";
+import { openDecisionCreateDialog, openTicketCreateDialog } from "./dialogs.js";
 import { STATUS_OPTIONS, decisionNumberOf } from "./statuses.js";
 
 // The groups of the document tree in the order the sidebar renders them. Tickets
@@ -172,6 +172,12 @@ function deleteMessage(entry) {
       message += ` ${orphaned} ${orphaned === 1 ? "ticket still references it" : "tickets still reference it"}.`;
     }
   }
+  if (entry.kind === "ticket") {
+    // Deleting a ticket removes its file only; it does not affect its epic, and
+    // the dependencies other tickets name in their `depends_on` are not updated
+    // (ticket 0052).
+    message += ` Deleting it does not affect its epic; the dependencies in other tickets are not updated.`;
+  }
   return message;
 }
 
@@ -203,18 +209,21 @@ function surfaceResponseWarnings(response) {
 }
 
 // Creates a document of one group through the creation affordance of the group:
-// the small native dialog for decisions (ticket 0032) or the prompt flow for the
-// kinds that still prompt (epics, features, tickets, ticket 0052).
+// the small native dialog for decisions (ticket 0032), the ticket-create dialog
+// of ticket 0052, or the prompt flow for the kinds that still prompt (epics and
+// features).
 async function createFromGroup(group) {
   const kind = CREATABLE_GROUPS[group].kind;
   let trimmedTitle;
-  if (kind !== "decision") {
+  if (kind !== "decision" && kind !== "ticket") {
     // Decisions create through the small native dialog of ticket 0032, which
     // asks for the title, the status and the optional supersedes target itself, so
     // the generic title prompt is skipped for decisions (ticket 0032, final closing
-    // review round). Features and epics start with a `planned` status, so the
-    // prompt carries the short hint instead of the person discovering it in the
-    // file (ticket 0030).
+    // review round); tickets create through the ticket dialog of ticket 0052,
+    // which asks for the title and the epic itself, so the generic prompt is
+    // skipped for tickets too (ticket 0052). Features and epics start with a
+    // `planned` status, so the prompt carries the short hint instead of the person
+    // discovering it in the file (ticket 0030).
     const titlePrompt =
       kind === "epic" || kind === "feature" ? `New ${kind} title (starts as planned):` : `New ${kind} title:`;
     const title = window.prompt(titlePrompt);
@@ -231,20 +240,28 @@ async function createFromGroup(group) {
   let epic;
   let feature;
   if (kind === "ticket") {
-    const epicPrompt = window.prompt("Epic directory (for example 0001-foundation):", epicDefault());
-    if (epicPrompt === null) {
+    // Tickets create through the dialog of ticket 0052: the title, the required
+    // epic select and the optional feature select replace the generic prompt
+    // flow of the v1 prompts, and the initial status is `todo`.
+    const outcome = await openTicketCreateDialog(epicChoices(), featureChoices());
+    if (outcome === null) {
+      // The person dismissed the dialog or did not pick an epic, so no ticket
+      // was created.
       return;
     }
-    epic = String(epicPrompt).trim();
+    const ticketTitle = String(outcome.title ?? "").trim();
+    if (ticketTitle.length === 0) {
+      showError(new Error("A ticket needs a title."));
+      return;
+    }
+    epic = String(outcome.epic ?? "");
     if (epic.length === 0) {
       showError(new Error("A ticket needs an epic directory."));
       return;
     }
-    const featurePrompt = window.prompt("Feature slug (optional):", "");
-    if (featurePrompt === null) {
-      return;
-    }
-    feature = String(featurePrompt).trim() || undefined;
+    feature = outcome.feature;
+    status = STATUS_OPTIONS.ticket[0];
+    documentTitle = ticketTitle;
   }
 
   let status;
@@ -466,10 +483,15 @@ function isExpectedDeleteOutcome(response) {
   return true;
 }
 
-// The epic directory offered as the default target of a ticket creation.
-function epicDefault() {
-  const epics = (state.tree?.docs ?? []).filter((doc) => doc?.kind === "epic");
-  return epics.length > 0 ? epics[0].path.split("/")[2] ?? "" : "";
+// The epic documents of the tree, as the create-ticket dialog's epic choices.
+function epicChoices() {
+  return (state.tree?.docs ?? []).filter((doc) => doc?.kind === "epic");
+}
+
+// The feature documents of the tree, as the create-ticket dialog's feature
+// choices; the optional feature of a new ticket is a feature slug.
+function featureChoices() {
+  return (state.tree?.docs ?? []).filter((doc) => doc?.kind === "feature");
 }
 
 function createCurrent() {

@@ -1,12 +1,13 @@
 //! The document editor: textarea, dirty state, save and preview (tickets 0023
 //! and 0024), plus the save conflict banner (ticket 0027) and the status control
-//! of features, epics and decisions (tickets 0030 and 0032), and the read-only
-//! supersedes line of decisions (ticket 0032).
+//! of features, epics, decisions and tickets (tickets 0030, 0032 and 0052), and
+//! the read-only supersedes line of decisions (ticket 0032) and the read-only
+//! epic and optional feature links of tickets (ticket 0052).
 
 import { state } from "./state.js";
 import { ApiError, getDoc, saveDoc } from "./api.js";
 import { showError, showWarning, showWarnings } from "./errors.js";
-import { STATUS_OPTIONS, statusKindOf, decisionNumberOf } from "./statuses.js";
+import { STATUS_OPTIONS, statusKindOf, decisionNumberOf, epicDirectoryOf } from "./statuses.js";
 
 // The textarea of the selected document; null until a document is loaded.
 let textarea = null;
@@ -91,6 +92,10 @@ let statusSavingPath = null;
 // status save supersedes an older one, and only the completing operation clears
 // the state when its token still matches (ticket 0030, fifth review round).
 let statusSaveToken = 0;
+// The read-only epic and optional feature links of an open ticket, rebuilt by
+// the editor render and cleared with it (ticket 0052); null until a ticket is
+// open.
+let ticketLinks = null;
 
 // Clears the in-flight status save state, but only while the completing
 // operation is still the newest one; a stale operation settling after a newer
@@ -322,6 +327,54 @@ function statusYamlValue(status) {
     return value;
   }
   return JSON.stringify(value);
+}
+
+// The front matter feature key line of a ticket: an optional indentation, the
+// `feature` key and the key's value, so a hand-edited feature binding of a ticket
+// (ticket 0052) can be read before it is validated against the existing features.
+const FEATURE_LINE = /^([ ]*)feature:(?:[ \t]+(.*))?$/;
+
+// The feature binding a ticket's front matter names, or null when the ticket
+// carries no feature key or no front matter block; the value is the slug without
+// the `.md` suffix, exactly like the server's ticket feature binding
+// (ticket 0052).
+export function ticketFeatureOf(content) {
+  const text = String(content ?? "").replace(/^\uFEFF/, "");
+  const lines = splitLines(text);
+  if (!lines.length || lines[0].value !== "---" || lines[0].eol === "") {
+    // No front matter block, so the ticket carries no feature binding.
+    return null;
+  }
+  let closing = -1;
+  for (let index = 1; index < lines.length; index += 1) {
+    if (lines[index].value === "---" && lines[index].eol !== "") {
+      closing = index;
+      break;
+    }
+  }
+  if (closing === -1) {
+    // An unterminated block is treated as absent, like the server's parser.
+    return null;
+  }
+  const rootIndent = rootIndentOf(lines, 1, closing);
+  let feature = null;
+  for (let index = 1; index < closing; index += 1) {
+    const line = lines[index];
+    const match = FEATURE_LINE.exec(line.value);
+    const indent = /^[ ]*/.exec(line.value)[0];
+    if (match && indent === rootIndent) {
+      // Only a feature key at the block's root indentation is the ticket's own
+      // binding; a key indented under another key is another mapping's subfield,
+      // so only the root key of the block can carry the ticket's binding.
+      const raw = (match[2] ?? "").trim();
+      const scalar = stripYamlComment(raw).trim();
+      const value = /^(['"])(.*)\1$/.test(scalar) ? scalar.slice(1, -1) : scalar;
+      if (feature === null) {
+        feature = value.length > 0 ? value : null;
+      }
+    }
+  }
+  return feature;
 }
 
 // The document content with its front matter status set to `status`, replacing
@@ -573,6 +626,7 @@ export function renderEditor() {
     conflictBanner = null;
     statusSelect = null;
     documentStatus = null;
+    ticketLinks = null;
     // The in-flight saves track their own entries per document path, so a
     // teardown with no #editor element must not erase an in-flight save that
     // belongs to another document; the save that owns a path clears its own
@@ -620,8 +674,9 @@ export function renderEditor() {
   toolbar.appendChild(previewButton);
 
   // The status select of the selected document lives in the editor toolbar for
-  // every kind whose status vocabulary the kind maps to (features, epics and
-  // decisions, ticket 0030 and 0032); every other kind gets no control.
+  // every kind whose status vocabulary the kind maps to (features, epics,
+  // decisions and tickets, tickets 0030, 0032 and 0052); every other kind gets no
+  // control.
   const kind = statusKindOf(state.current?.path);
   let supersedesLine = null;
   if (kind && STATUS_OPTIONS[kind]) {
@@ -669,6 +724,16 @@ export function renderEditor() {
     }
   }
 
+  if (kind === "ticket") {
+    // The open ticket carries the read-only epic link derived from its path and
+    // the optional feature link of its binding, so the person can open the epic
+    // or the feature the ticket belongs to without leaving the editor
+    // (ticket 0052); neither is editable here, the epic membership is the path.
+    ticketLinks = renderTicketLinks();
+  } else {
+    ticketLinks = null;
+  }
+
   textarea = document.createElement("textarea");
   textarea.id = "document-content";
   textarea.className = "document-content";
@@ -693,6 +758,9 @@ export function renderEditor() {
   if (supersedesLine) {
     element.appendChild(supersedesLine);
   }
+  if (ticketLinks) {
+    element.appendChild(ticketLinks);
+  }
   element.appendChild(textarea);
 }
 
@@ -714,6 +782,66 @@ export function openSupersedes() {
     (doc) => doc?.kind === "decision" && decisionNumberOf(doc.path) === Number(number),
   );
   return { number, missing: !exists };
+}
+
+// The read-only epic and optional feature links of an open ticket, derived from
+// the ticket path and its front matter binding (ticket 0052): the epic link
+// navigates to the epic document, the optional feature link to the feature the
+// ticket names, and a feature that no longer resolves stays visible as a missing
+// label instead of breaking the epic link. The epic membership is never edited
+// here; the path is the only binding.
+export function renderTicketLinks() {
+  const element = document.createElement("p");
+  element.id = "ticket-links";
+  element.className = "ticket-links";
+
+  const epicDirectory = epicDirectoryOf(state.current?.path);
+  if (epicDirectory) {
+    const epicLabel = document.createElement("span");
+    epicLabel.textContent = "Epic: ";
+    const epicLink = document.createElement("a");
+    epicLink.id = "ticket-epic-link";
+    epicLink.className = "ticket-link";
+    epicLink.textContent = epicDirectory;
+    epicLink.href = `sdlc/epics/${epicDirectory}/description.md`;
+    epicLink.addEventListener("click", (event) => {
+      event.preventDefault();
+      void loadDocument(`sdlc/epics/${epicDirectory}/description.md`).catch(() => {});
+    });
+    element.append(epicLabel, epicLink);
+  }
+
+  const entry = (state.tree?.docs ?? []).find((doc) => doc?.path === state.current?.path);
+  const feature = entry?.kind === "ticket" ? entry?.feature ?? null : null;
+  if (feature) {
+    const featureSlug = String(feature).replace(/\.md$/, "");
+    const featurePath = `sdlc/features/${featureSlug}.md`;
+    const featureExists = (state.tree?.docs ?? []).some(
+      (doc) => doc?.kind === "feature" && doc?.path === featurePath,
+    );
+    const featureLabel = document.createElement("span");
+    featureLabel.textContent = "Feature: ";
+    if (featureExists) {
+      const featureLink = document.createElement("a");
+      featureLink.id = "ticket-feature-link";
+      featureLink.className = "ticket-link";
+      featureLink.textContent = featureSlug;
+      featureLink.href = featurePath;
+      featureLink.addEventListener("click", (event) => {
+        event.preventDefault();
+        void loadDocument(featurePath).catch(() => {});
+      });
+      element.append(featureLabel, featureLink);
+      return element;
+    }
+    const missing = document.createElement("span");
+    missing.id = "ticket-feature-link";
+    missing.className = "ticket-link";
+    missing.textContent = `Feature: ${featureSlug} (unknown)`;
+    element.append(featureLabel, missing);
+    return element;
+  }
+  return element;
 }
 
 // Shows the non-modal save conflict banner: the disk changed since the person
@@ -1011,6 +1139,16 @@ async function overwriteWithMine() {
   }
 }
 
+// Whether a feature slug the ticket names resolves to an existing feature
+// document, so an edited ticket feature can be validated on save (ticket 0052).
+function featureResolves(feature) {
+  const slug = String(feature ?? "").replace(/\.md$/, "");
+  const featurePath = `sdlc/features/${slug}.md`;
+  return (state.tree?.docs ?? []).some(
+    (doc) => doc?.kind === "feature" && doc?.path === featurePath,
+  );
+}
+
 // The content of the editor buffer right now: the live textarea value when the
 // textarea is connected, the stored document content otherwise, so a diff view
 // that detached the textarea still reads the text the person is editing.
@@ -1062,8 +1200,9 @@ export async function loadDocument(path) {
 
 // After a successful save: surface the feature-index refresh outcome as
 // warnings and, for a document whose save may have changed a status (feature,
-// epic or decision), refresh the document tree and re-read the saved status to
-// sync the status select (ticket 0030, ticket 0032). The person may have switched
+// epic, decision or ticket), refresh the document tree and re-read the saved
+// status to sync the status select (tickets 0030, 0032 and 0052). The person may
+// have switched
 // documents while the save was in flight, and a status save may itself be applying
 // the result, so the helper bails before writing state that no longer belongs to
 // the selected document; it returns whether the saved document is still the
@@ -1073,9 +1212,10 @@ function refreshStatusAfterSave(path, savedContent, response) {
   const savedKind = statusKindOf(path);
   const hasStatus = Boolean(savedKind && STATUS_OPTIONS[savedKind]);
   if (hasStatus) {
-    // The saved document is a feature, epic or decision, so its sidebar badge may
-    // have changed and the PRD feature index was refreshed by the server during the
-    // save (ticket 0029); refresh the tree for those saves alone. The refresh is
+    // The saved document is a feature, epic, decision or ticket, so its sidebar
+    // badge may have changed and the PRD feature index was refreshed by the server
+    // during the save (ticket 0029); refresh the tree for those saves alone. The
+    // refresh is
     // best effort and must not turn a successful save into a reported failure, so
     // a failure surfaces as a warning while the save itself stays successful.
     refreshTree().catch((error) => {
@@ -1165,6 +1305,17 @@ export async function save({ allowDuringStatusSave = false } = {}) {
     const text = thisTextarea?.isConnected ? thisTextarea.value : content;
     const contentToSave = toSavedContent(text, savedContent);
     const response = await saveDoc(path, contentToSave, hash);
+    if (statusKindOf(path) === "ticket") {
+      // A ticket's `feature` line may have been edited by hand, which the save
+      // keeps; an unresolvable feature is surfaced as a warning on save instead of
+      // blocking the edit (ticket 0052).
+      const feature = ticketFeatureOf(contentToSave);
+      if (feature && !featureResolves(feature)) {
+        showWarning(
+          `The ticket feature "${feature}" does not resolve; create or rename the feature first.`,
+        );
+      }
+    }
     // Route the saved response through the shared outcome helper before the
     // document-switch guard, so both save paths share one outcome handling (ticket
     // 0030, final review round): a save that resolved just as the person switched

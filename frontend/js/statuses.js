@@ -1,15 +1,16 @@
 //! The status vocabularies of the document kinds that carry a status (tickets
-//! 0030 and 0032).
+//! 0030, 0032 and 0052).
 
 // A feature offers planned/in-progress/shipped; an epic planned/in-progress/done;
-// a decision the ADR statuses proposed/accepted/superseded (ticket 0031). Every
-// other kind has no status control at all. The decision vocabulary is
-// decision-only, so a status sent for another kind is a misplaced field the
-// server refuses instead of a status of that kind.
+// a decision the ADR statuses proposed/accepted/superseded (ticket 0031); a ticket
+// todo/in-progress/done (ticket 0052). Every other kind has no status control at
+// all. The decision vocabulary is decision-only, so a status sent for another kind
+// is a misplaced field the server refuses instead of a status of that kind.
 export const STATUS_OPTIONS = {
   feature: ["planned", "in-progress", "shipped"],
   epic: ["planned", "in-progress", "done"],
   decision: ["proposed", "accepted", "superseded"],
+  ticket: ["todo", "in-progress", "done"],
 };
 
 // Whether `value` is a lowercase kebab-case slug: alphanumeric words joined by
@@ -42,17 +43,19 @@ function isNumberedSlug(value) {
 }
 
 // The status vocabulary kind of a document path, or null for kinds that carry
-// no status control (ticket 0030). Only features and epics have a status; a
-// ticket never gets a control because it has no status vocabulary. A feature is
-// a single file directly under `sdlc/features` named after a lowercase kebab-case
-// slug, and an epic the `description.md` of its own four-digit-prefixed epic
-// directory, so deeper paths never match. The path is normalized the way the
-// server normalizes a captured path and validates it (`parse_captured_path` drops
-// a leading slash, separators are `/` only and the layout is lowercase
-// kebab-case), so an equivalent path still resolves to the same kind; a path that
-// carries a backslash or a dot segment the server rejects never resolves to a
-// status kind here either, so a client-constructed path the server would refuse is
-// never treated as one the server would accept.
+// no status control (ticket 0030). Features and epics carry a status, decisions
+// carry the ADR status of ticket 0031, and tickets carry the todo/in-progress/
+// done status of ticket 0052; every other kind has no status control at all. A
+// feature is a single file directly under `sdlc/features` named after a lowercase
+// kebab-case slug, and an epic the `description.md` of its own four-digit-prefixed
+// epic directory, so deeper paths never match; a ticket is the
+// `tickets/<number>-<slug>.md` file of one such epic directory. The path is
+// normalized the way the server normalizes a captured path and validates it
+// (`parse_captured_path` drops a leading slash, separators are `/` only and the
+// layout is lowercase kebab-case), so an equivalent path still resolves to the
+// same kind; a path that carries a backslash or a dot segment the server rejects
+// never resolves to a status kind here either, so a client-constructed path the
+// server would refuse is never treated as one the server would accept.
 function pathSegments(path) {
   return String(path ?? "").replace(/^\//, "").split("/");
 }
@@ -101,6 +104,23 @@ export function statusKindOf(path) {
     if (file.endsWith(".md") && file.length > 4 && isNumberedSlug(file.slice(0, -3))) {
       return "decision";
     }
+  }
+  if (
+    segments[0] === "sdlc" &&
+    segments[1] === "epics" &&
+    segments.length === 5 &&
+    segments[3] === "tickets" &&
+    isNumberedSlug(segments[2] ?? "") &&
+    file.endsWith(".md") &&
+    isNumberedSlug(file.slice(0, -3))
+  ) {
+    // `sdlc/epics/<number>-<slug>/tickets/<number>-<slug>.md` is the whole
+    // ticket; the epic directory and the ticket file both have to be
+    // backend-valid numbered documents, and the ticket vocabulary is
+    // todo/in-progress/done (ticket 0052), so an open ticket gets the status
+    // control of the toolbar while its epic membership stays the path, never a
+    // front matter key.
+    return "ticket";
   }
   return null;
 }

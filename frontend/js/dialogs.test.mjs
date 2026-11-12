@@ -5,7 +5,7 @@
 import { after, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { STATUS_OPTIONS } from "./statuses.js";
-import { openDecisionCreateDialog, supersedesOptions } from "./dialogs.js";
+import { openDecisionCreateDialog, openTicketCreateDialog, supersedesOptions, ticketCreateOutcome } from "./dialogs.js";
 
 // The editor module wires browser globals while it loads; give Node the minimal
 // surface the dialog helpers need, and restore the previous values when the
@@ -211,4 +211,78 @@ test("the decision dialog resolves the outcome picked with Create", async () => 
     status: "accepted",
     supersedes: 1,
   });
+});
+
+// The ticket-create dialog of ticket 0052: the title, the required epic select,
+// the optional feature select, the initial status `todo` and the create action.
+
+const TICKET_EPIC = [{ kind: "epic", path: "sdlc/epics/0007-ticket-generation/description.md", title: "0007: Ticket generation" }];
+const TICKET_FEATURE = [{ kind: "feature", path: "sdlc/features/export.md", title: "Export" }];
+
+test("the ticket dialog resolves the outcome picked with Create", async () => {
+  const pending = openTicketCreateDialog([TICKET_EPIC], [TICKET_FEATURE]);
+  const dialog = createdDialogs[createdDialogs.length - 1];
+  const titleInput = dialog.children[0];
+  titleInput.value = "Add CSV export";
+  const epicSelect = dialog.children[1];
+  epicSelect.value = "0007-ticket-generation";
+  const featureSelect = dialog.children[2];
+  featureSelect.value = "export";
+  const statusSelect = dialog.children[3];
+  statusSelect.value = STATUS_OPTIONS.ticket[0];
+  const createButton = findButtonById(dialog, "ticket-dialog-create");
+  createButton.fire("click", {});
+  assert.deepEqual(await pending, {
+    title: "Add CSV export",
+    epic: "0007-ticket-generation",
+    feature: "export",
+    status: "todo",
+  });
+});
+
+test("the ticket dialog resolves null when the person dismisses it with Escape", async () => {
+  const pending = openTicketCreateDialog([TICKET_EPIC]);
+  const dialog = createdDialogs[createdDialogs.length - 1];
+  dialog.fire("cancel", { preventDefault: () => {} });
+  assert.equal(await pending, null);
+});
+
+test("the ticket dialog resolves null when Create is clicked without an epic", async () => {
+  const pending = openTicketCreateDialog([TICKET_EPIC]);
+  const dialog = createdDialogs[createdDialogs.length - 1];
+  dialog.children[0].value = "Add CSV export";
+  // The epic select keeps its placeholder, so no epic was picked.
+  const createButton = findButtonById(dialog, "ticket-dialog-create");
+  createButton.fire("click", {});
+  assert.equal(await pending, null);
+});
+
+test("the ticket dialog disables Create and explains when no epic exists yet", async () => {
+  const pending = openTicketCreateDialog([]);
+  const dialog = createdDialogs[createdDialogs.length - 1];
+  const createButton = findButtonById(dialog, "ticket-dialog-create");
+  assert.equal(createButton.disabled, true);
+  assert.equal(
+    dialog.children[4].textContent,
+    "No epic exists yet, so a ticket cannot be created. Create an epic first, then open this dialog again.",
+  );
+});
+
+test("ticketCreateOutcome rejects a ticket without a title or epic", () => {
+  assert.equal(ticketCreateOutcome({ title: "Add export", epic: "" }), null);
+  assert.equal(ticketCreateOutcome({ title: "", epic: "0007-ticket-generation" }), null);
+});
+
+test("ticketCreateOutcome keeps the optional feature and falls back to the todo status", () => {
+  const withFeature = ticketCreateOutcome({
+    title: "Add export",
+    epic: "0007-ticket-generation",
+    feature: "export",
+    status: "bogus",
+  });
+  assert.equal(withFeature.feature, "export");
+  assert.equal(withFeature.status, "todo");
+  const withoutFeature = ticketCreateOutcome({ title: "Add export", epic: "0007-ticket-generation" });
+  assert.equal(withoutFeature.feature, undefined);
+  assert.equal(withoutFeature.status, "todo");
 });

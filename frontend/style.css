@@ -758,6 +758,106 @@ body {
   outline-offset: 2px;
 }
 
+/* The small native dialog of the ticket-create flow (ticket 0052): the title
+   input, the required epic select, the optional feature select, the initial
+   status and the create action; the browser owns the focus trap and the Escape
+   handling of a modal dialog. A project without any epic disables the Create
+   action and explains why (ticket 0052). */
+.ticket-dialog {
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  padding: 1rem;
+  width: min(90vw, 34rem);
+  background: #ffffff;
+  color: #1a1a1a;
+}
+
+.ticket-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.ticket-dialog-title {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  color: inherit;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+
+.ticket-dialog-epic,
+.ticket-dialog-feature,
+.ticket-dialog-status {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+
+.ticket-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.ticket-dialog button {
+  padding: 0.2rem 0.75rem;
+  font: inherit;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ticket-dialog .ticket-dialog-create {
+  background: #dbe7f8;
+  border-color: #9db9e0;
+}
+
+.ticket-dialog-explanation {
+  margin: 0.5rem 0 0;
+  color: #666666;
+  font-size: 0.85rem;
+}
+
+.ticket-dialog-title:focus-visible,
+.ticket-dialog-epic:focus-visible,
+.ticket-dialog-feature:focus-visible,
+.ticket-dialog-status:focus-visible,
+.ticket-dialog button:focus-visible {
+  outline: 2px solid #8bb0e8;
+  outline-offset: 2px;
+}
+
+/* The read-only epic and optional feature links of an open ticket, rendered in
+   the editor area under the toolbar (ticket 0052); the epic link navigates to the
+   epic document and the feature link to the feature the ticket names. */
+.ticket-links {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  margin: 0;
+  padding: 0.15rem 0.75rem;
+  border-bottom: 1px solid #e0e0e0;
+  color: #555555;
+  font-size: 0.85rem;
+}
+
+.ticket-links .ticket-link {
+  color: #0366d6;
+}
+
+.ticket-links .ticket-link:hover,
+.ticket-links .ticket-link:focus-visible {
+  text-decoration: underline;
+}
+
 .error-banner {
   position: fixed;
   top: 0;

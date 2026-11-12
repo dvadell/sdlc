@@ -16,7 +16,7 @@ globalThis.document = globalThis.document ?? {
   createElement: (tag) => ({ tagName: tag }),
 };
 
-const { groupEntries } = await import("./sidebar.js");
+const { groupEntries, ticketCount } = await import("./sidebar.js");
 
 after(() => {
   if (savedWindow === undefined) {
@@ -66,4 +66,15 @@ test("groupEntries keeps other groups untouched", () => {
   ];
   const groups = groupEntries(docs);
   assert.deepEqual(groups.map(([group]) => group), ["core", "feature"]);
+});
+
+test("ticketCount counts the tickets of one epic directory", () => {
+  const docs = [
+    { kind: "ticket", path: "sdlc/epics/0007-ticket-generation/tickets/0052-ticket-crud-ui.md", epic: "0007-ticket-generation" },
+    { kind: "ticket", path: "sdlc/epics/0007-ticket-generation/tickets/0053-ticket-filters.md", epic: "0007-ticket-generation" },
+    { kind: "ticket", path: "sdlc/epics/0001-foundation/tickets/0001-project.md", epic: "0001-foundation" },
+  ];
+  assert.equal(ticketCount(docs, "0007-ticket-generation"), 2);
+  assert.equal(ticketCount(docs, "0001-foundation"), 1);
+  assert.equal(ticketCount([], "0007-ticket-generation"), 0);
 });

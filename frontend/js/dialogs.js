@@ -179,3 +179,188 @@ export function openDecisionCreateDialog(decisions, value) {
     }
   });
 }
+
+// The ticket-create outcome: the title the person picked, the epic directory the
+// ticket is written under, the optional feature slug and the initial status.
+// The epic is required and the feature optional; the status of a new ticket is
+// `todo` (ticket 0052).
+export function ticketCreateOutcome(outcome) {
+  const title = String(outcome?.title ?? "").trim();
+  const epic = String(outcome?.epic ?? "").trim();
+  if (title.length === 0 || epic.length === 0) {
+    // The dialog only resolves a create outcome for a title and an epic; the
+    // person has to pick both before a ticket exists.
+    return null;
+  }
+  const feature = outcome?.feature ? String(outcome.feature) : undefined;
+  const status = STATUS_OPTIONS.ticket.includes(String(outcome?.status ?? "")) ? String(outcome.status) : STATUS_OPTIONS.ticket[0];
+  return { title, epic, feature, status };
+}
+
+// Opens the ticket-create dialog: title, epic select (existing epics, required)
+// and optional feature select, then resolves with the outcome the person picked
+// or with null when they dismissed it. The dialog is a native `<dialog>`, so the
+// browser owns the focus trap and the Escape handling; a cancelled or closed
+// without a valid outcome dialog settles null, and a project without any epic
+// cannot submit (ticket 0052).
+export function openTicketCreateDialog(epics, features) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let outcome = null;
+    const settle = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+
+    const dialog = document.createElement("dialog");
+    dialog.className = "ticket-dialog";
+    dialog.setAttribute("aria-label", "New ticket");
+    dialog.setAttribute("aria-modal", "true");
+
+    const titleInput = document.createElement("input");
+    titleInput.type = "text";
+    titleInput.id = "ticket-dialog-title";
+    titleInput.className = "ticket-dialog-title";
+    titleInput.setAttribute("aria-label", "Ticket title");
+
+    const epicSelect = document.createElement("select");
+    epicSelect.id = "ticket-dialog-epic";
+    epicSelect.className = "ticket-dialog-epic";
+    epicSelect.setAttribute("aria-label", "Epic");
+    const epicPlaceholder = document.createElement("option");
+    epicPlaceholder.value = "";
+    epicPlaceholder.textContent = "Select an epic";
+    epicPlaceholder.selected = true;
+    epicSelect.appendChild(epicPlaceholder);
+    const epicChoices = (epics ?? [])
+      .filter((epic) => epic?.kind === "epic")
+      .map((epic) => String(epic?.path ?? "").split("/")[2] ?? "");
+    for (const epic of epicChoices) {
+      if (epic.length === 0) {
+        continue;
+      }
+      const option = document.createElement("option");
+      option.value = epic;
+      option.textContent = epic;
+      epicSelect.appendChild(option);
+    }
+
+    const featureSelect = document.createElement("select");
+    featureSelect.id = "ticket-dialog-feature";
+    featureSelect.className = "ticket-dialog-feature";
+    featureSelect.setAttribute("aria-label", "Feature");
+    const noFeature = document.createElement("option");
+    noFeature.value = "";
+    noFeature.textContent = "None";
+    featureSelect.appendChild(noFeature);
+    const featureChoices = (features ?? [])
+      .filter((feature) => feature?.kind === "feature")
+      .map((feature) => String(feature?.path ?? "").split("/")[2] ?? "")
+      .map((slug) => slug.replace(/\.md$/, ""));
+    for (const feature of featureChoices) {
+      if (feature.length === 0) {
+        continue;
+      }
+      const option = document.createElement("option");
+      option.value = feature;
+      option.textContent = feature;
+      featureSelect.appendChild(option);
+    }
+
+    const statusSelect = document.createElement("select");
+    statusSelect.id = "ticket-dialog-status";
+    statusSelect.className = "ticket-dialog-status";
+    statusSelect.setAttribute("aria-label", "Ticket status");
+    for (const status of STATUS_OPTIONS.ticket) {
+      const option = document.createElement("option");
+      option.value = status;
+      option.textContent = status;
+      statusSelect.appendChild(option);
+    }
+    statusSelect.value = STATUS_OPTIONS.ticket[0];
+
+    const actions = document.createElement("div");
+    actions.className = "ticket-dialog-actions";
+    const cancelButton = document.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.id = "ticket-dialog-cancel";
+    cancelButton.className = "ticket-dialog-cancel";
+    cancelButton.textContent = "Cancel";
+    cancelButton.addEventListener("click", () => {
+      dialog.close();
+    });
+    actions.appendChild(cancelButton);
+    const createButton = document.createElement("button");
+    createButton.type = "button";
+    createButton.id = "ticket-dialog-create";
+    createButton.className = "ticket-dialog-create";
+    createButton.textContent = "Create";
+    createButton.disabled = epicChoices.length === 0;
+    createButton.addEventListener("click", () => {
+      const pickedTitle = String(titleInput.value ?? "").trim();
+      if (pickedTitle.length === 0) {
+        // An empty title never names a ticket, so dismiss instead of resolving
+        // a create outcome the caller would have to re-validate.
+        dialog.close();
+        return;
+      }
+      const pickedEpic = String(epicSelect.value ?? "").trim();
+      if (pickedEpic.length === 0) {
+        // A ticket needs an epic; without one the submit is rejected and the
+        // dialog dismisses without an outcome (ticket 0052).
+        dialog.close();
+        return;
+      }
+      outcome = {
+        title: pickedTitle,
+        epic: pickedEpic,
+        feature: String(featureSelect.value ?? "").trim() || undefined,
+        status: String(statusSelect.value ?? ""),
+      };
+      dialog.close();
+    });
+    actions.appendChild(createButton);
+
+    const explanation = document.createElement("p");
+    explanation.className = "ticket-dialog-explanation";
+    explanation.textContent = epicChoices.length === 0
+      ? "No epic exists yet, so a ticket cannot be created. Create an epic first, then open this dialog again."
+      : "";
+
+    dialog.appendChild(titleInput);
+    dialog.appendChild(epicSelect);
+    dialog.appendChild(featureSelect);
+    dialog.appendChild(statusSelect);
+    dialog.appendChild(explanation);
+    dialog.appendChild(actions);
+
+    dialog.addEventListener("close", () => {
+      // The Create button closes with the outcome it just set; a cancel or a
+      // close without an outcome settles the dismissed value.
+      settle(ticketCreateOutcome(outcome));
+      dialog.remove();
+    });
+    // The fallback Escape handling of the native dialog: a cancelled dialog is
+    // closed by hand so the close event settles the dismissed outcome; the
+    // default action of cancel is to close, so only the close is needed.
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      dialog.close();
+    });
+
+    try {
+      document.body.appendChild(dialog);
+      dialog.showModal();
+    } catch {
+      dialog.remove();
+      // The dialog could not be attached or shown; settle the dismissed
+      // outcome so the awaiting create flow cannot hang forever (ticket 0032,
+      // final closing review round).
+      settle(null);
+      return;
+    }
+  });
+}

@@ -117,6 +117,7 @@ const {
   renderEditor,
   setRefreshTree,
   proposalPendingNote,
+  ticketFeatureOf,
 } = await import("./editor.js");
 
 const FEATURE = STATUS_OPTIONS.feature;
@@ -273,6 +274,24 @@ test("withStatus preserves mixed CRLF and LF line endings", () => {
   );
 });
 
+// The feature binding of a ticket (ticket 0052): an optional `feature` key of
+// the ticket front matter, which the person may edit in the textarea but which
+// is validated against the existing features on save.
+
+test("ticketFeatureOf reads the optional feature binding of a ticket", () => {
+  assert.equal(
+    ticketFeatureOf("---\nstatus: todo\ndepends_on: []\nfeature: export\n---\n\n# 0052: Ticket create/edit/delete UI\n"),
+    "export",
+  );
+});
+
+test("ticketFeatureOf returns null for a ticket without a feature binding", () => {
+  assert.equal(
+    ticketFeatureOf("---\nstatus: todo\ndepends_on: []\n---\n\n# 0052: Ticket create/edit/delete UI\n"),
+    null,
+  );
+});
+
 // The pending-proposal note of the editor area (ticket 0047): an AI proposal for
 // the AI rules file replaces the whole file, so the person is told to review the
 // full-file diff instead of the line patch of the feature proposals.
@@ -332,9 +351,26 @@ test("statusKindOf maps backend-valid epic paths to the epic kind", () => {
   assert.equal(statusKindOf("sdlc/epics/9999-foundation/description.md"), "epic");
 });
 
+test("statusKindOf maps backend-valid ticket paths to the ticket kind", () => {
+  // A ticket is the `tickets/<number>-<slug>.md` file of one epic directory, and
+  // the ticket vocabulary todo/in-progress/done (ticket 0052) is the status
+  // control of the open ticket.
+  assert.equal(statusKindOf("sdlc/epics/0001-foundation/tickets/0001-project.md"), "ticket");
+  assert.equal(statusKindOf("/sdlc/epics/0001-foundation/tickets/0001-project.md"), "ticket");
+  assert.equal(statusKindOf("sdlc/epics/0007-ticket-generation/tickets/0052-ticket-crud-ui.md"), "ticket");
+});
+
 test("statusKindOf maps backend-valid numbered documents without a status control to null", () => {
-  assert.equal(statusKindOf("sdlc/epics/0001-foundation/tickets/0001-project.md"), null);
   assert.equal(statusKindOf("sdlc/PRD.md"), null);
+});
+
+test("statusKindOf rejects backend-invalid ticket paths", () => {
+  // The epic directory and the ticket file both have to be backend-valid numbered
+  // documents; a malformed directory or file name never carries a status control.
+  assert.equal(statusKindOf("sdlc/epics/foundation/tickets/0001-project.md"), null);
+  assert.equal(statusKindOf("sdlc/epics/0001-foundation/tickets/project.md"), null);
+  assert.equal(statusKindOf("sdlc/epics/0001-foundation/tickets/0001-Project.md"), null);
+  assert.equal(statusKindOf("sdlc/epics/0001-foundation/tickets/nested/0001-project.md"), null);
 });
 
 test("statusKindOf maps backend-valid decision paths to the decision kind", () => {
@@ -356,6 +392,12 @@ test("the decision status vocabulary is the ADR statuses", () => {
   // The decision vocabulary of ticket 0031 and the toolbar select of ticket
   // 0032 (same pattern as the features of ticket 0030).
   assert.deepEqual(STATUS_OPTIONS.decision, ["proposed", "accepted", "superseded"]);
+});
+
+test("the ticket status vocabulary is todo/in-progress/done", () => {
+  // The ticket vocabulary of ticket 0052: a new ticket starts `todo` and the
+  // person moves it through the toolbar of the open ticket.
+  assert.deepEqual(STATUS_OPTIONS.ticket, ["todo", "in-progress", "done"]);
 });
 
 test("statusKindOf rejects backend-invalid feature paths", () => {
@@ -547,6 +589,119 @@ test("changing the status of a decision saves through the normal path and update
   deferred.resolve({ hash: "hash-4" });
   await decisionStatusSave;
   assert.equal(statusSelect().value, "accepted");
+});
+
+// The status control and the read-only links of an open ticket (ticket 0052):
+// the toolbar select of the todo/in-progress/done vocabulary and the epic and
+// optional feature links rendered under the toolbar.
+
+const TICKET_PATH = "sdlc/epics/0007-ticket-generation/tickets/0052-ticket-crud-ui.md";
+
+function loadTicketDoc(path, content, hash) {
+  state.current.path = path;
+  state.current.content = content;
+  state.current.savedContent = content;
+  state.current.hash = hash;
+  state.dirty = true;
+}
+
+test("renderEditor shows the ticket status select with the todo initial status", () => {
+  state.tree = {
+    layout_exists: true,
+    docs: [
+      {
+        kind: "ticket",
+        path: TICKET_PATH,
+        title: "0052: Ticket create/edit/delete UI",
+        status: "todo",
+        feature: null,
+      },
+    ],
+  };
+  loadTicketDoc(TICKET_PATH, "---\nstatus: todo\ndepends_on: []\n---\n\n# 0052: Ticket create/edit/delete UI\n", "hash-5");
+  renderEditor();
+  const select = statusSelect();
+  assert.ok(select);
+  assert.equal(select.value, "todo");
+  // The ticket vocabulary of ticket 0052 rides the shared toolbar select, with
+  // the "No status" placeholder outside the vocabulary ahead of the ticket
+  // statuses.
+  assert.deepEqual(
+    select.children.map((option) => option.value),
+    ["", "todo", "in-progress", "done"],
+  );
+});
+
+test("changing the status of a ticket saves through the normal path and updates the select", async () => {
+  state.tree = {
+    layout_exists: true,
+    docs: [
+      {
+        kind: "ticket",
+        path: TICKET_PATH,
+        title: "0052: Ticket create/edit/delete UI",
+        status: "todo",
+        feature: null,
+      },
+    ],
+  };
+  loadTicketDoc(TICKET_PATH, "---\nstatus: todo\ndepends_on: []\n---\n\n# 0052: Ticket create/edit/delete UI\n", "hash-5");
+  renderEditor();
+  assert.equal(statusSelect().value, "todo");
+  const deferred = stubFetch();
+  const ticketStatusSave = changeStatus("in-progress");
+  assert.equal(deferred.calls.length, 1);
+  deferred.resolve({ hash: "hash-6" });
+  await ticketStatusSave;
+  assert.equal(statusSelect().value, "in-progress");
+});
+
+test("renderEditor shows the ticket status select and the epic and feature links", () => {
+  state.tree = {
+    layout_exists: true,
+    docs: [
+      {
+        kind: "ticket",
+        path: TICKET_PATH,
+        title: "0052: Ticket create/edit/delete UI",
+        status: "todo",
+        feature: "export",
+      },
+      { kind: "feature", path: "sdlc/features/export.md", title: "Export" },
+    ],
+  };
+  loadTicketDoc(TICKET_PATH, "---\nstatus: todo\ndepends_on: []\nfeature: export\n---\n\n# 0052: Ticket create/edit/delete UI\n", "hash-5");
+  renderEditor();
+  const epicLink = editorElement.querySelector("#ticket-epic-link");
+  assert.ok(epicLink);
+  assert.equal(epicLink.textContent, "0007-ticket-generation");
+  assert.equal(epicLink.href, "sdlc/epics/0007-ticket-generation/description.md");
+  const featureLink = editorElement.querySelector("#ticket-feature-link");
+  assert.ok(featureLink);
+  assert.equal(featureLink.textContent, "export");
+  assert.equal(featureLink.href, "sdlc/features/export.md");
+});
+
+test("renderEditor keeps the epic link and marks an unknown feature as missing", () => {
+  state.tree = {
+    layout_exists: true,
+    docs: [
+      {
+        kind: "ticket",
+        path: TICKET_PATH,
+        title: "0052: Ticket create/edit/delete UI",
+        status: "todo",
+        feature: "missing-feature",
+      },
+    ],
+  };
+  loadTicketDoc(TICKET_PATH, "---\nstatus: todo\ndepends_on: []\nfeature: missing-feature\n---\n\n# 0052: Ticket create/edit/delete UI\n", "hash-5");
+  renderEditor();
+  const epicLink = editorElement.querySelector("#ticket-epic-link");
+  assert.ok(epicLink);
+  const featureLink = editorElement.querySelector("#ticket-feature-link");
+  assert.ok(featureLink);
+  assert.equal(featureLink.textContent, "Feature: missing-feature (unknown)");
 });
 
 // A fetch stub that answers the first request with a save conflict and holds the
