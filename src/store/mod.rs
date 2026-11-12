@@ -224,6 +224,13 @@ impl RecentWrites {
         self.record(path, None);
     }
 
+    /// Forgets the remembered write of `path`, as when a write that was about to
+    /// run did not run and must not stay remembered (ticket 0055).
+    pub fn forget(&self, path: &str) {
+        let path = path.replace('\\', "/");
+        self.lock_entries().remove(&path);
+    }
+
     /// Decides whether a change of `path` must be published (ticket 0055).
     ///
     /// `current_hash` is the hash of the file as the watcher read it back; `None`
@@ -231,14 +238,15 @@ impl RecentWrites {
     /// that still matches the file suppresses the event; a recorded delete whose
     /// file stays missing suppresses it as well, and anything else is published.
     pub fn should_publish(&self, path: &str, current_hash: Option<&str>) -> bool {
+        let path = path.replace('\\', "/");
         let mut entries = self.lock_entries();
-        let Some(entry) = entries.get(path).cloned() else {
+        let Some(entry) = entries.get(&path).cloned() else {
             // No write was recorded for the path, so the change is not ours.
             return true;
         };
         if entry.inserted.elapsed() > self.ttl {
             // The grace period elapsed, so the recorded write is stale context.
-            entries.remove(path);
+            entries.remove(&path);
             return true;
         }
 
@@ -256,7 +264,7 @@ impl RecentWrites {
         if publish {
             // The change is not the recorded write, so the write it belongs to is
             // spent; forgetting it lets later external changes publish again.
-            entries.remove(path);
+            entries.remove(&path);
         }
 
         publish
@@ -283,11 +291,15 @@ impl RecentWrites {
 
     /// Records one write or delete, pruning expired entries and bounding the
     /// remembered writes (ticket 0055).
+    ///
+    /// The path is normalized to the slash-separated form the document paths
+    /// use, so a recorded key and a watched key cannot drift apart (ticket 0055).
     fn record(&self, path: &str, hash: Option<&str>) {
+        let path = path.replace('\\', "/");
         let mut entries = self.lock_entries();
         entries.retain(|_, entry| entry.inserted.elapsed() <= self.ttl);
         entries.insert(
-            path.to_string(),
+            path,
             RecentWrite {
                 hash: hash.map(str::to_string),
                 inserted: Instant::now(),
@@ -858,6 +870,44 @@ impl DocStore {
     }
 }
 
+/// The tickets of an epic directory that a rename moves with it, as the old and
+/// new document paths plus the content hash the move kept (ticket 0055).
+///
+/// The epic rename moves the whole epic directory, so every ticket under its
+/// `tickets/` directory travels with it; each moved ticket is remembered as a
+/// delete of the old path and a write of the new one, so the watcher does not
+/// publish the events of the move itself. An epic directory without a `tickets`
+/// directory simply moves no ticket.
+fn epic_moved_tickets(
+    from_dir: &Path,
+    from: &DocPath,
+    to: &DocPath,
+) -> Result<Vec<(String, String, String)>, StoreError> {
+    let Some(from_epic) = layout::epic_of(from.as_path()) else {
+        return Ok(Vec::new());
+    };
+    let Some(to_epic) = layout::epic_of(to.as_path()) else {
+        return Ok(Vec::new());
+    };
+    let tickets_dir = from_dir.join("tickets");
+    let entries = std::fs::read_dir(&tickets_dir)?;
+    let mut moved = Vec::new();
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.ends_with(".md") {
+            continue;
+        }
+        let old_path = format!("sdlc/epics/{from_epic}/tickets/{file_name}");
+        let new_path = format!("sdlc/epics/{to_epic}/tickets/{file_name}");
+        let hash = content_hash(&std::fs::read(entry.path())?);
+        moved.push((old_path, new_path, hash));
+    }
+    Ok(moved)
+}
+
 /// Renames an already-resolved source onto an already-resolved destination,
 /// touching the filesystem only after every check passed.
 ///
@@ -908,12 +958,21 @@ fn rename_resolved(
                 ));
             }
             let moved_hash = content_hash(&std::fs::read(source)?);
+            // The tickets of the epic move with its directory, so the move is
+            // remembered for each of them: a delete of the old ticket path and a
+            // write of the new one with the content the move kept, so the watcher
+            // suppresses the events of the move itself (ticket 0055).
+            let moved_tickets = epic_moved_tickets(from_dir, from, to)?;
             std::fs::rename(from_dir, target)?;
             // The rename moves the content, so the destination is a write of the
             // same content and the source a delete; both are remembered, so the
             // watcher suppresses the events of the move itself (ticket 0055).
             recent.record_delete(&from.as_path().to_string_lossy());
             recent.record_write(&to.as_path().to_string_lossy(), &moved_hash);
+            for (old_path, new_path, hash) in moved_tickets {
+                recent.record_delete(&old_path);
+                recent.record_write(&new_path, &hash);
+            }
             Ok(to.clone())
         }
         DocKind::Ticket => {
@@ -1106,11 +1165,17 @@ fn save_critical(
             if current_hash != hash.as_str() {
                 return Err(StoreError::Conflict { current_hash });
             }
-            // The content is known before the write runs, so the hash is
-            // recorded before the write completes and the watcher event cannot
-            // arrive first (ticket 0055).
+            // The content is known before the write runs, so the hash is the one
+            // the write produces and the watcher event of the write cannot arrive
+            // before the write is recorded, because the debounced event fires only
+            // after the write completed; the write is therefore recorded once it
+            // succeeded, so a failed write leaves no remembered write behind
+            // (ticket 0055).
+            if let Err(error) = write_atomic(resolved, owned_content.as_bytes()) {
+                recent.forget(&owned.as_path().to_string_lossy());
+                return Err(error);
+            }
             recent.record_write(&owned.as_path().to_string_lossy(), &new_hash);
-            write_atomic(resolved, owned_content.as_bytes())?;
         }
         Expectation::Missing => {
             if path_exists(resolved)? {
@@ -1118,8 +1183,11 @@ fn save_critical(
                     owned.as_path().display().to_string(),
                 ));
             }
+            if let Err(error) = write_atomic(resolved, owned_content.as_bytes()) {
+                recent.forget(&owned.as_path().to_string_lossy());
+                return Err(error);
+            }
             recent.record_write(&owned.as_path().to_string_lossy(), &new_hash);
-            write_atomic(resolved, owned_content.as_bytes())?;
         }
     }
 
@@ -2257,6 +2325,24 @@ mod tests {
             document.content,
             "---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n"
         );
+
+        // The move of the epic remembers the moved ticket as its own write, so
+        // the watcher does not publish the events of the move itself (ticket
+        // 0055).
+        let recent = store.recent_writes();
+        let moved_hash =
+            content_hash(b"---\nstatus: todo\nfeature: export\n---\n\n# 0001: Project\n");
+        assert!(
+            !recent.should_publish(
+                "sdlc/epics/0001-platform/tickets/0001-project.md",
+                Some(moved_hash.as_str()),
+            ),
+            "the moved ticket is remembered as the epic rename's own write"
+        );
+        assert!(
+            !recent.should_publish("sdlc/epics/0001-foundation/tickets/0001-project.md", None,),
+            "the old ticket path of the move is remembered as deleted"
+        );
     }
 
     #[tokio::test]
@@ -2602,7 +2688,19 @@ mod tests {
         recent.record_write("sdlc/PRD.md", &content_hash(b"# Fresh\n"));
         assert!(
             !recent.should_publish("sdlc/PRD.md", Some(content_hash(b"# Fresh\n").as_str())),
-            "a write recorded after the delete is published"
+            "a write recorded after the delete is suppressed as well"
+        );
+    }
+
+    #[test]
+    fn forgetting_a_remembered_write_publishes_the_next_change() {
+        let recent = RecentWrites::new();
+
+        recent.record_write("sdlc/PRD.md", "hash");
+        recent.forget("sdlc/PRD.md");
+        assert!(
+            recent.should_publish("sdlc/PRD.md", Some("hash")),
+            "a forgotten write is not remembered, so the change is published"
         );
     }
 

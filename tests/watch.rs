@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use sdlc::chat::Block;
 use sdlc::proposal::ProposalService;
-use sdlc::store::{DocPath, DocStore, Expectation, content_hash};
+use sdlc::store::{DocPath, DocStore, Expectation, RecentWrites, content_hash};
 use sdlc::watch::{EventHub, FileChanged};
 use tempfile::TempDir;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -183,7 +183,7 @@ async fn dropping_a_subscriber_does_not_stop_the_watcher() {
 
 #[tokio::test]
 async fn watcher_startup_failure_is_reported_for_a_missing_root() {
-    let hub = EventHub::new();
+    let hub = EventHub::with_recent_writes(Arc::new(RecentWrites::new()));
 
     sdlc::watch::start(Path::new("/definitely/missing/sdlc"), &hub)
         .await

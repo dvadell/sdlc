@@ -43,22 +43,13 @@ pub struct EventHub {
 }
 
 impl EventHub {
-    /// Creates a hub that keeps [`EVENT_CAPACITY`] events for lagging subscribers.
-    pub fn new() -> Self {
-        Self::with_capacity(EVENT_CAPACITY)
-    }
-
-    /// Creates a hub that keeps `capacity` events for lagging subscribers.
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            sender: broadcast::Sender::new(capacity),
-            capacity,
-            recent: Arc::new(RecentWrites::new()),
-        }
-    }
-
     /// Creates a hub that compares the debounced events against the given
     /// recent writes (ticket 0055).
+    ///
+    /// The hub is suppression-aware only through the recent writes of a store:
+    /// the constructor requires them, so no hub can be built without the write
+    /// history that tells the watcher which changes are the app's own (ticket
+    /// 0055).
     pub fn with_recent_writes(recent_writes: Arc<RecentWrites>) -> Self {
         Self {
             sender: broadcast::Sender::new(EVENT_CAPACITY),
@@ -124,12 +115,6 @@ impl EventHub {
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
-    }
-}
-
-impl Default for EventHub {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
