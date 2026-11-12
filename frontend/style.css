@@ -190,6 +190,30 @@ body {
   padding: 0 0.4rem 0.3rem;
 }
 
+/* The optional "Tickets for current epic" filter of the sidebar (ticket 0053);
+   the toggle reuses the plain action styling until the ticket list grows its own
+   visual language. */
+#sidebar .doc-filter {
+  padding: 0.1rem 0.5rem;
+  font: inherit;
+  font-size: 0.75rem;
+  color: inherit;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#sidebar .doc-filter:hover,
+#sidebar .doc-filter:focus-visible {
+  background: #e4e4e4;
+}
+
+#sidebar .doc-filter:focus-visible {
+  outline: 2px solid #8bb0e8;
+  outline-offset: 2px;
+}
+
 #editor {
   grid-area: editor;
   display: flex;

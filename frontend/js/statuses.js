@@ -60,6 +60,22 @@ function pathSegments(path) {
   return String(path ?? "").replace(/^\//, "").split("/");
 }
 
+// The status text of a tree entry of a status-carrying kind, or null when the
+// entry has no status or the front matter value is outside the kind vocabulary
+// (tickets 0030, 0032 and 0053); the sidebar renders the text of the badge itself,
+// so the badge is readable without seeing the color, and an unknown status shows
+// no badge at all.
+export function entryStatus(entry) {
+  const options = STATUS_OPTIONS[statusKindOf(entry?.path)];
+  const status = entry?.status;
+  if (!options || typeof status !== "string" || !options.includes(status)) {
+    // The document has no status control or the front matter carries no valid
+    // status of the kind; nothing to show in the badge.
+    return null;
+  }
+  return status;
+}
+
 // Whether a path segment is one the server's document path rules reject: a
 // dot segment, an empty segment, a NUL or a backslash; the same predicate the
 // status and slug helpers of this module share (ticket 0052).
