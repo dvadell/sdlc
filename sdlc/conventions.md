@@ -449,6 +449,7 @@ export function renderDiff(container, diffText) {
 | `just run` | `cargo run`; in debug builds frontend files are read from disk, so a browser refresh picks up changes |
 | `just check` | `cargo fmt`, `cargo clippy`, `cargo test` |
 | `just release` | `cargo build --release` (the frontend is embedded as-is) |
+| `just check-release` | Build the release binary, copy it to a temp dir and prove it serves the embedded frontend |
 
 - Release binaries are built per target platform and named `sdlc` (`sdlc.exe` on Windows).
 - To update `marked` or `DOMPurify`, replace the file in `frontend/vendor/`, update the recorded version, and run through the manual checklist (open, edit, preview, chat, accept a proposal).

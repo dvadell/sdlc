@@ -7,6 +7,7 @@ use thiserror::Error;
 
 /// Command line arguments for the sdlc binary.
 #[derive(Debug, Clone, Default, Parser)]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 pub struct CliArgs {
     /// Project directory to operate on; stored canonicalized.
     #[arg(long, default_value = ".", value_name = "DIR")]
@@ -235,7 +236,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -300,6 +301,13 @@ mod tests {
             Config::from_parts(args(".", 9000, true), |_| None).expect("config should build");
 
         assert!(config.open);
+    }
+
+    #[test]
+    fn version_prints_the_package_version() {
+        let command = CliArgs::command();
+
+        assert_eq!(command.get_version(), Some(env!("CARGO_PKG_VERSION")));
     }
 
     #[test]

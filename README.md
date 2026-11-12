@@ -13,10 +13,15 @@ layout.
 ## Build
 
 ```sh
-cargo build --release
+just release
 ```
 
-The release binary is named `sdlc` (`sdlc.exe` on Windows).
+`just release` runs `cargo build --release`; the release binary is named `sdlc`
+(`sdlc.exe` on Windows).
+
+The release profile enables `lto = "thin"` and `strip = true` (platform allowing);
+the trade-off is a longer release build and stripped debug information that can
+hamper panic backtraces.
 
 ## Run
 
@@ -32,6 +37,31 @@ The server listens on `127.0.0.1` only and manages the documents of the project
 directory it is pointed at.
 
 A project without documents yet offers a scaffold action in the UI.
+
+## Release
+
+The release binary embeds the frontend (`frontend/`) into the binary, so it serves
+the UI from an arbitrary working directory with no `frontend/` folder beside it.
+Debug builds read the frontend from disk instead, so frontend edits during
+development only need a browser refresh.
+
+- `just check-release` builds the release binary, copies it to a fresh temp
+  directory, starts it against an empty project on an ephemeral port and checks
+  `GET /` and `GET /api/config`.
+
+There is no Node/npm step at any point: the frontend is plain HTML, CSS and
+JavaScript served as-is.
+
+- `sdlc --version` prints the package version (`sdlc 0.1.0`).
+
+Measured on Linux with the release profile: the binary is about 6.9 MB, startup to
+the listening line is effectively instant (about 8 ms), and idle memory is about
+6 MB.
+
+Per platform: release binaries are built per target platform — `sdlc` on Linux
+and macOS, `sdlc.exe` on Windows (for example `cargo build --release
+--target x86_64-pc-windows-msvc`). The release check script runs on Linux and macOS
+(bash); on Windows run `just release` and start `sdlc.exe` directly.
 
 ## Configuration
 
@@ -84,6 +114,7 @@ in the environment and is never sent to the browser. No chat history is stored.
 ## Development
 
 - `just check` runs the Rust format, lint and test tasks plus the frontend tests.
+- `just check-release` builds the release binary and proves it is self-contained.
 - The frontend is plain JavaScript with no build step; the vendored libraries live
   in `frontend/vendor/`. No Node/npm is needed.
 

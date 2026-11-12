@@ -30,3 +30,8 @@ check:
 # Build the release binary.
 release:
     cargo build --release
+
+# Build the release binary and prove it serves the embedded frontend from an
+# arbitrary working directory with no `frontend/` folder beside it.
+check-release:
+    scripts/check-release.sh
