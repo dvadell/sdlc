@@ -108,11 +108,23 @@ async fn existing_tickets(
         {
             continue;
         }
-        if let Ok(document) = state.store.read(&entry.path).await {
-            existing.push(ExistingTicket {
-                path: entry.path.as_path().to_string_lossy().into_owned(),
-                content: document.content,
-            });
+        match state.store.read(&entry.path).await {
+            Ok(document) => {
+                existing.push(ExistingTicket {
+                    path: entry.path.as_path().to_string_lossy().into_owned(),
+                    content: document.content,
+                });
+            }
+            Err(error) => {
+                // The tree listed the ticket, so it was readable when the tree
+                // was built; a re-read that fails now is a race, and the ticket is
+                // reported rather than silently dropped from the context.
+                tracing::warn!(
+                    error = %error,
+                    path = %entry.path.as_path().display(),
+                    "skipping an existing ticket that the regeneration context could not re-read"
+                );
+            }
         }
     }
 
