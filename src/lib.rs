@@ -111,25 +111,50 @@ pub async fn serve(config: Config, listener: TcpListener) -> Result<SocketAddr, 
         }
     };
 
-    let shutdown = async {
+    let served = tokio::spawn(async move {
+        axum::serve(listener, router(state))
+            .await
+            .map_err(|source| ServerError::Io {
+                port: configured_port,
+                source,
+            })
+    });
+    let served_abort = served.abort_handle();
+
+    // Ticket 0064: the stop is immediate on Ctrl-C; aborting the serve task
+    // beats waiting for open client connections (the file-change SSE stream) to
+    // close before the server exits. The main task owns the Ctrl-C stop, and a
+    // serve task that ends first still reports its own failure.
+    tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
+        served_abort.abort();
+    });
+
+    let outcome = served.await;
+    let serve_error = match outcome {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        // The task was aborted by the Ctrl-C stop; the stop is a clean exit.
+        Err(error) if error.is_cancelled() => None,
+        Err(error) => {
+            // A non-cancelled JoinError means the serve task panicked; surface the
+            // panic reason rather than hiding it behind an I/O error message.
+            tracing::error!(error = %error, "the serve task ended unexpectedly");
+            Some(ServerError::Io {
+                port: configured_port,
+                source: std::io::Error::other(error),
+            })
+        }
     };
 
-    let served = axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(|source| ServerError::Io {
-            port: configured_port,
-            source,
-        });
-
-    // The watcher task is stopped on every exit path of the serve future,
-    // including a failed serve, before the outcome is returned.
+    // The watcher task is stopped on every exit path, before the outcome is returned.
     if let Some(watcher) = watcher {
         watcher.abort();
     }
 
-    served?;
+    if let Some(error) = serve_error {
+        return Err(error);
+    }
 
     Ok(addr)
 }

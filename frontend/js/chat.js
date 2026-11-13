@@ -518,6 +518,18 @@ function bindInput(input) {
   }
   input.__chatInputBound = true;
   input.addEventListener("keydown", onInputKeydown);
+  // The send control derives from the composer, the open document and the AI
+  // state, so it recomputes on every edit; before it was only recomputed on
+  // panel renders, which left it stale after the person typed or opened a
+  // document (manual QA of the release checklist).
+  input.addEventListener("input", onInputChange);
+}
+
+function onInputChange() {
+  const send = document.querySelector("#chat-send");
+  if (send) {
+    send.disabled = !canSend();
+  }
 }
 
 function bindComposer(element) {
@@ -593,8 +605,14 @@ export async function sendChat() {
   autoScroll();
   if (outcome.error) {
     // The failed reply leaves no empty assistant bubble behind; the error
-    // replaces it as the single readable error bubble of the transcript.
-    state.chat.messages.pop();
+    // replaces it as the single readable error bubble of the transcript. A
+    // reply that already streamed text keeps it, and the error rides beside the
+    // answer instead of destroying it.
+    const last = state.chat.messages[state.chat.messages.length - 1];
+    const streamedText = last?.role === "assistant" && (last.content ?? "").length > 0;
+    if (!streamedText) {
+      state.chat.messages.pop();
+    }
     appendError(outcome.error);
     renderChat();
     autoScroll();

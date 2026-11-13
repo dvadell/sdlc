@@ -23,6 +23,9 @@
  - SubscriberInitExt::set_default (scoped/thread-local) also calls tracing_log::LogTracer::init(), which sets the global log dispatcher; a later init_tracing() try_init then fails with SetLoggerError. Use tracing::subscriber::with_default (scoped) in tests instead of set_default.
 
 - axum 0.8 has no `with_ctrl_c`; use `Serve::with_graceful_shutdown` with an async future that awaits `tokio::signal::ctrl_c()` for Ctrl-C shutdown.
+- The `with_graceful_shutdown` stop path waits for open client connections to close, so a
+  browser-held SSE stream can keep the server from stopping on Ctrl-C; own the stop in the main
+  task and abort the serve task instead of waiting out graceful shutdown.
 - tokio features used directly by sdlc (`net`, `signal`, `io-util`, `macros`/`rt`, `time`) must be declared in `Cargo.toml` even when axum pulls some in transitively; without them the server types and async test helpers used here do not compile.
 
 - A delegated agent can hit the provider free-usage limit mid-task (the ticket-solver
@@ -65,5 +68,14 @@
 - `ocr review` skips commits that touch no code item it selects, so a docs-only
   ticket commit can come back "skipped" instead of reviewed; treat a clean skip on a
   docs-only commit as the closing result and state the selection basis when closing.
+
+- The chat send button is derived state (`canSend`: AI configured, no stream, composer
+  text and open document), but it was only recomputed inside `renderChat`, so picking a
+  document or typing never re-enabled it before the next render; composer edits must
+  re-run the derivation through an input listener.
+
+- A chat reply that ends in a proposal refusal streams its text first and only then
+  fails, so the error path must keep a reply that already streamed text instead of
+  dropping it for the error bubble.
 
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.

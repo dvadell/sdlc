@@ -453,6 +453,7 @@ export function renderDiff(container, diffText) {
 
 - Release binaries are built per target platform and named `sdlc` (`sdlc.exe` on Windows).
 - To update `marked` or `DOMPurify`, replace the file in `frontend/vendor/`, update the recorded version, and run through the manual checklist (open, edit, preview, chat, accept a proposal).
+- Control+C / SIGINT should stop the server immediately or within a second.
 
 ## 13. Git and commits
 

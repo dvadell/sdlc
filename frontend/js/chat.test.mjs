@@ -318,6 +318,20 @@ test("the send control is disabled while the composer is empty", () => {
   assert.equal(sendElement.disabled, true);
 });
 
+test("the send control enables when the composer gains text and re-gates on the open document", () => {
+  renderChat();
+  assert.equal(sendElement.disabled, true);
+
+  inputElement.value = "Hello panel";
+  inputElement.fire("input", {});
+  assert.equal(sendElement.disabled, false);
+
+  state.current = { path: null, content: "", savedContent: "", hash: null };
+  inputElement.value = "Hello panel";
+  inputElement.fire("input", {});
+  assert.equal(sendElement.disabled, true);
+});
+
 test("enter sends the composer text and shift+enter keeps the newline", async () => {
   response = sseResponse(["event: done\ndata: {}\n\n"]);
   inputElement.value = "Hello panel";
@@ -555,6 +569,31 @@ test("a stream error becomes one readable error bubble and frees the composer", 
   assert.equal(state.chat.messages.length, 2);
   assert.equal(state.chat.messages[1].role, "error");
   assert.equal(state.chat.messages[1].content, "The AI key was rejected.");
+  // The composer accepts a new message again after the error.
+  inputElement.value = "Retry please";
+  renderChat();
+  assert.equal(sendElement.disabled, false);
+});
+
+test("a proposal refusal error keeps the streamed reply text and frees the composer", async () => {
+  response = sseResponse([
+    'event: delta\ndata: {"text": "The old ticket file should be created."}\n\n',
+    'event: error\ndata: {"code":"missing_target","message":"the proposed document is missing: sdlc/epics/0001-foundation/tickets/0007-old-ticket.md"}\n\n',
+  ]);
+  inputElement.value = "Draft the missing ticket";
+
+  await sendChat();
+
+  assert.equal(state.chat.streaming, false);
+  // The streamed answer stays beside the refusal instead of being dropped.
+  assert.equal(state.chat.messages.length, 3);
+  assert.equal(state.chat.messages[1].role, "assistant");
+  assert.equal(state.chat.messages[1].content, "The old ticket file should be created.");
+  assert.equal(state.chat.messages[2].role, "error");
+  assert.equal(
+    state.chat.messages[2].content,
+    "the proposed document is missing: sdlc/epics/0001-foundation/tickets/0007-old-ticket.md",
+  );
   // The composer accepts a new message again after the error.
   inputElement.value = "Retry please";
   renderChat();
