@@ -78,4 +78,9 @@
   fails, so the error path must keep a reply that already streamed text instead of
   dropping it for the error bubble.
 
+- A create of a kind whose title comes from a kind-specific dialog (the ticket
+  dialog of ticket 0052 or the decision dialog of ticket 0032) must never fall back
+  to the generic prompt title; the kind-specific outcome owns the title, so the
+  create flow may only use the generic prompt for the kinds that still prompt.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
