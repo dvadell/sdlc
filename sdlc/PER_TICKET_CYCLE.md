@@ -91,4 +91,7 @@
   clicks that originate from nested action buttons (rename/delete) before
   toggling, or the toggle fires together with the action.
 
+- Nested sidebar lists need their own indentation rule (a nested `ul` gets its
+  own margin), otherwise child tasks read as flat siblings of their parent epic.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
