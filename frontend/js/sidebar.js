@@ -537,6 +537,22 @@ export function setGroupCollapsed(group, collapsed) {
   }
 }
 
+// Whether the ticket list of one epic is collapsed; the default is an expanded
+// epic, so its tickets render until a toggle chooses otherwise (ticket 0068).
+export function isEpicCollapsed(epic) {
+  return state.collapsedEpics.has(epic);
+}
+
+// Collapses or expands the ticket list of one epic, remembering the choice for
+// the next render (ticket 0068).
+export function setEpicCollapsed(epic, collapsed) {
+  if (collapsed) {
+    state.collapsedEpics.add(epic);
+  } else {
+    state.collapsedEpics.delete(epic);
+  }
+}
+
 function getContainer() {
   if (container !== null && !container.isConnected) {
     if (boundElement === container) {
@@ -962,10 +978,29 @@ export function renderSidebar() {
       // The tickets of an epic are nested under the epic entry of the group, in
       // numeric ticket order, instead of living in a flat ticket group of their
       // own (ticket 0053); the epic entries themselves are ordered by epic number.
+      // Each epic is collapsible, so its ticket list renders only while the epic
+      // is not collapsed (ticket 0068).
       for (const entry of entries ?? []) {
         const epic = epicSlugOf(entry.path) ?? "";
-        list.appendChild(createRow("epic", entry, tree.docs));
+        const item = createRow("epic", entry, tree.docs);
         if (epic) {
+          // The epic row carries its collapsed state for assistive tech, and its
+          // click toggles the epic's ticket list (ticket 0068).
+          item.querySelector(".doc-row")?.setAttribute("aria-expanded", String(!isEpicCollapsed(epic)));
+          item.addEventListener("click", (event) => {
+            // Clicking an epic collapses or expands its ticket list; stop the
+            // propagation so the click does not also navigate to the epic doc, and
+            // ignore the rename/delete actions that live on the row (ticket 0068).
+            if (event.target instanceof Element && event.target.closest(".doc-actions")) {
+              return;
+            }
+            event.stopPropagation();
+            setEpicCollapsed(epic, !isEpicCollapsed(epic));
+            renderSidebar();
+          });
+        }
+        list.appendChild(item);
+        if (epic && !isEpicCollapsed(epic)) {
           for (const ticket of ticketsOfEpic(tree.docs, epic)) {
             list.appendChild(createRow("ticket", ticket, tree.docs));
           }

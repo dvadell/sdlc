@@ -25,6 +25,10 @@ export const state = {
   // 0067; every group starts expanded and lives here, so the session-only display
   // filters of the sidebar share one state object.
   collapsedGroups: new Set(),
+  // The epic directories whose ticket list is collapsed through the toggle of
+  // ticket 0068; an expanded epic renders its tickets, a collapsed one renders
+  // none, so the epics list shows the epics and their tickets stay nested.
+  collapsedEpics: new Set(),
   // Chat panel state: the messages of the in-page transcript, whether a reply
   // is streaming and the attached document paths of the conversation (ticket
   // 0039). The transcript and the attachments live here and nowhere else: no
