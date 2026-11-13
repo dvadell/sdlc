@@ -1001,9 +1001,13 @@ export function renderSidebar() {
         }
         list.appendChild(item);
         if (epic && !isEpicCollapsed(epic)) {
+          // The tickets of the epic live in a nested list, so they read as the
+          // tasks of that epic instead of flat siblings of the epic (ticket 0069).
+          const ticketsList = document.createElement("ul");
           for (const ticket of ticketsOfEpic(tree.docs, epic)) {
-            list.appendChild(createRow("ticket", ticket, tree.docs));
+            ticketsList.appendChild(createRow("ticket", ticket, tree.docs));
           }
+          list.appendChild(ticketsList);
         }
       }
     } else if (group === "unassigned") {
