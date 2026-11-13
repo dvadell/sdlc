@@ -83,4 +83,8 @@
   to the generic prompt title; the kind-specific outcome owns the title, so the
   create flow may only use the generic prompt for the kinds that still prompt.
 
+- Sidebar group collapse is a session-only display filter, so it lives in the
+  shared frontend `state` object alongside the other display filters instead of a
+  module-local Set.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
