@@ -21,6 +21,7 @@ body {
 }
 
 #app {
+  position: relative;
   display: grid;
   grid-template-columns: 260px 1fr 360px;
   grid-template-rows: auto 1fr;
@@ -28,6 +29,36 @@ body {
     "header header header"
     "sidebar editor chat";
   height: 100%;
+}
+
+/* The drag handles of the resizable sidebars (ticket 0070); they sit on the
+   edges of the fixed columns and follow the drag of the owning sidebar. */
+#sidebar-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 260px;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 10;
+}
+
+#chat-resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 360px;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 10;
+}
+
+#sidebar-resize:focus-visible,
+#chat-resize:focus-visible {
+  outline: 2px solid #8bb0e8;
+  outline-offset: 2px;
 }
 
 /* The error banner floats over the top of the layout; when it is revealed,

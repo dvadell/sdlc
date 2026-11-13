@@ -28,6 +28,7 @@ the checklist itself.
 | [0066](tickets/0066-new-ticket-create-bad-request.md) | New ticket creation fails with bad request | 0038, 0061 |
 | [0068](tickets/0068-sidebar-epics-list-tickets.md) | Sidebar epics section lists all tickets | 0038, 0061 |
 | [0069](tickets/0069-sidebar-epic-task-indentation.md) | Sidebar epic task indentation | 0038, 0061 |
+| [0070](tickets/0070-resizable-sidebars.md) | Resizable sidebars | 0038, 0061 |
 
 ## Exit criteria
 
