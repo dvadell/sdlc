@@ -21,6 +21,10 @@ export const state = {
   // the optional "Tickets for current epic" filter of ticket 0053; it defaults to
   // off and lives here, so it is a session-only display filter.
   ticketsForCurrentEpic: false,
+  // The sidebar groups whose heading is collapsed through the toggle of ticket
+  // 0067; every group starts expanded and lives here, so the session-only display
+  // filters of the sidebar share one state object.
+  collapsedGroups: new Set(),
   // Chat panel state: the messages of the in-page transcript, whether a reply
   // is streaming and the attached document paths of the conversation (ticket
   // 0039). The transcript and the attachments live here and nowhere else: no

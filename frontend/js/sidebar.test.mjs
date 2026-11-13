@@ -18,7 +18,8 @@ globalThis.document = globalThis.document ?? {
   createElement: (tag) => ({ tagName: tag }),
 };
 
-const { groupEntries, ticketCount, ticketsOfEpic, createTitle } = await import("./sidebar.js");
+const { groupEntries, ticketCount, ticketsOfEpic, createTitle, isGroupCollapsed, setGroupCollapsed } =
+  await import("./sidebar.js");
 
 after(() => {
   if (savedWindow === undefined) {
@@ -159,6 +160,18 @@ test("createTitle takes the decision outcome title for decisions", () => {
 test("createTitle takes the trimmed generic prompt title for epic and feature creates", () => {
   assert.equal(createTitle("epic", " New epic ", null), "New epic");
   assert.equal(createTitle("feature", " New feature ", null), "New feature");
+});
+
+test("the sidebar group headings start expanded and toggle per group", () => {
+  // Every group heading starts expanded, and a toggle collapses or expands one
+  // group at a time (ticket 0067).
+  assert.equal(isGroupCollapsed("epic"), false);
+  assert.equal(isGroupCollapsed("core"), false);
+  setGroupCollapsed("epic", true);
+  assert.equal(isGroupCollapsed("epic"), true);
+  assert.equal(isGroupCollapsed("core"), false);
+  setGroupCollapsed("epic", false);
+  assert.equal(isGroupCollapsed("epic"), false);
 });
 
 test("ticketCount counts the tickets of one epic directory", () => {

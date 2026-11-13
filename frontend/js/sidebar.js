@@ -521,6 +521,22 @@ let container = null;
 let boundElement = null;
 let refreshGeneration = 0;
 
+// Whether the heading of one sidebar group is collapsed; the default is an
+// expanded group, so a group is only collapsed when a toggle chose that.
+export function isGroupCollapsed(group) {
+  return state.collapsedGroups.has(group);
+}
+
+// Collapses or expands the heading of one sidebar group, remembering the
+// choice for the next render (ticket 0067).
+export function setGroupCollapsed(group, collapsed) {
+  if (collapsed) {
+    state.collapsedGroups.add(group);
+  } else {
+    state.collapsedGroups.delete(group);
+  }
+}
+
 function getContainer() {
   if (container !== null && !container.isConnected) {
     if (boundElement === container) {
@@ -912,7 +928,30 @@ export function renderSidebar() {
     heading.textContent = hasEntries
       ? `${GROUP_LABELS[group] ?? group} (${entries.length})`
       : GROUP_LABELS[group] ?? group;
+    const toggleGroup = () => {
+      // The heading of a group is the toggle of that group (ticket 0067).
+      setGroupCollapsed(group, !isGroupCollapsed(group));
+      renderSidebar();
+    };
+    heading.addEventListener("click", toggleGroup);
+    heading.setAttribute("role", "button");
+    heading.setAttribute("tabindex", "0");
+    heading.setAttribute("aria-expanded", String(!isGroupCollapsed(group)));
+    heading.addEventListener("keydown", (event) => {
+      // The heading toggle answers to Enter and Space like a button (ticket 0067).
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      toggleGroup();
+    });
     element.appendChild(heading);
+
+    if (isGroupCollapsed(group)) {
+      // A collapsed group keeps its heading as the toggle and renders no list
+      // until it is expanded again (ticket 0067).
+      continue;
+    }
 
     if (creatable) {
       element.appendChild(createNewButton(group));
