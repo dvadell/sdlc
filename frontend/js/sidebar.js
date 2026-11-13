@@ -210,6 +210,19 @@ function surfaceResponseWarnings(response) {
   }
 }
 
+// The title a create of one kind sends into the API: the outcome title of the
+// kind-specific create flow (the ticket dialog of ticket 0052 or the decision
+// dialog of ticket 0032) for those kinds, or the trimmed generic prompt title of
+// the kinds that still prompt (epics and features, ticket 0030). A ticket never
+// takes its title from the generic prompt, so a ticket outcome title is the title
+// of the create; a decision outcome title is the title of the create as well.
+export function createTitle(kind, promptTitle, outcome) {
+  if (kind === "ticket" || kind === "decision") {
+    return String(outcome?.title ?? "").trim();
+  }
+  return String(promptTitle ?? "").trim();
+}
+
 // Creates a document of one group through the creation affordance of the group:
 // the small native dialog for decisions (ticket 0032), the ticket-create dialog
 // of ticket 0052, or the prompt flow for the kinds that still prompt (epics and
@@ -266,7 +279,7 @@ async function createFromGroup(group) {
     }
     feature = outcome.feature;
     status = outcome.status ?? STATUS_OPTIONS.ticket[0];
-    documentTitle = ticketTitle;
+    documentTitle = createTitle("ticket", trimmedTitle, outcome);
   }
 
   if (kind === "decision") {
@@ -289,7 +302,7 @@ async function createFromGroup(group) {
       showError(new Error(`The decision status must be ${STATUS_OPTIONS.decision.join("/ ")}.`));
       return;
     }
-    documentTitle = decidedTitle;
+    documentTitle = createTitle("decision", trimmedTitle, outcome);
     status = decidedStatus;
     const pickedSupersedes = outcome.supersedes;
     const parsedSupersedes = Number(pickedSupersedes);
@@ -308,7 +321,11 @@ async function createFromGroup(group) {
       return;
     }
     supersedes = isPositiveInteger ? parsedSupersedes : undefined;
-  } else {
+  } else if (kind !== "ticket") {
+    // Epics and features create through the generic prompt, so their title is
+    // the trimmed prompt value; tickets already resolved theirs from the
+    // ticket-create dialog (ticket 0052), and decisions from the decision dialog
+    // (ticket 0032), so neither may fall back to the generic prompt title.
     documentTitle = trimmedTitle;
   }
 

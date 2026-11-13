@@ -18,7 +18,7 @@ globalThis.document = globalThis.document ?? {
   createElement: (tag) => ({ tagName: tag }),
 };
 
-const { groupEntries, ticketCount, ticketsOfEpic } = await import("./sidebar.js");
+const { groupEntries, ticketCount, ticketsOfEpic, createTitle } = await import("./sidebar.js");
 
 after(() => {
   if (savedWindow === undefined) {
@@ -140,6 +140,25 @@ test("entryStatus renders the front matter status and drops unknown ones", () =>
     null,
     "an absent status shows no badge",
   );
+});
+
+test("createTitle takes the ticket outcome title for tickets, never the generic prompt title", () => {
+  // The ticket-create dialog owns the title of a new ticket (ticket 0052), so
+  // the create title is the outcome title even when a prompt title is around;
+  // the previous create flow let the generic prompt fallback clobber it.
+  assert.equal(createTitle("ticket", "ignored", { title: "0066: New ticket bug" }), "0066: New ticket bug");
+  assert.equal(createTitle("ticket", "", { title: "Add CSV export" }), "Add CSV export");
+  assert.equal(createTitle("ticket", "ignored", { title: "   Add CSV export  " }), "Add CSV export");
+  assert.equal(createTitle("ticket", "ignored", null), "", "a ticket create needs an outcome title");
+});
+
+test("createTitle takes the decision outcome title for decisions", () => {
+  assert.equal(createTitle("decision", "ignored", { title: "Use axum" }), "Use axum");
+});
+
+test("createTitle takes the trimmed generic prompt title for epic and feature creates", () => {
+  assert.equal(createTitle("epic", " New epic ", null), "New epic");
+  assert.equal(createTitle("feature", " New feature ", null), "New feature");
 });
 
 test("ticketCount counts the tickets of one epic directory", () => {

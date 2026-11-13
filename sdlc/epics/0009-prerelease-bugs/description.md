@@ -25,6 +25,7 @@ the checklist itself.
 | # | Title | Depends on |
 |---|-------|------------|
 | [0065](tickets/0065-prerelease-bug-fixes.md) | Prerelease bug fixes | 0038, 0061 |
+| [0066](tickets/0066-new-ticket-create-bad-request.md) | New ticket creation fails with bad request | 0038, 0061 |
 
 ## Exit criteria
 
