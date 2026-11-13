@@ -62,4 +62,8 @@
   reading fields; test doubles must inject the string form, or the suite exercises a
   shape that never occurs in the browser.
 
+- `ocr review` skips commits that touch no code item it selects, so a docs-only
+  ticket commit can come back "skipped" instead of reviewed; treat a clean skip on a
+  docs-only commit as the closing result and state the selection basis when closing.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
