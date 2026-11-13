@@ -87,4 +87,8 @@
   shared frontend `state` object alongside the other display filters instead of a
   module-local Set.
 
+- A click handler attached to a wrapper element (a sidebar list item) must ignore
+  clicks that originate from nested action buttons (rename/delete) before
+  toggling, or the toggle fires together with the action.
+
 Important: Delegate the task to the ticket-solver or build agent. Do not do it yourself.
